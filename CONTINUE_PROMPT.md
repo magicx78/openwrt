@@ -1,12 +1,12 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.0
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.2
 
-> Stand: 2026-02-28 | Datei: server.py (~6000 Zeilen) | DB: provision.db (SQLite)
+> Stand: 2026-02-28 | Datei: server.py (~6100 Zeilen) | DB: provision.db (SQLite)
 
 ---
 
 ## Aktueller Status
 
-Der Server ist **stabil und produktionsbereit**. Version 0.4.0 wurde vollstaendig implementiert.
+Der Server ist **stabil und produktionsbereit**. Version 0.4.2 wurde vollstaendig implementiert.
 
 ### Was laeuft
 
@@ -30,6 +30,10 @@ Der Server ist **stabil und produktionsbereit**. Version 0.4.0 wurde vollstaendi
 | Diagnose (Server + SSH) | OK | /ui/diagnose/{mac} |
 | Rollen-Overrides | OK | ap1, node, repeater mit UCI-Overrides |
 | IP-Tracking | OK | last_ip in DB, SSH-Vorausfuellung |
+| 99-provision.sh dynamisch | OK | NEU v0.4.1: _generate_provision_sh(), kein static file |
+| /api/config/{mac} | OK | NEU v0.4.1: UCI-Config fuer Router nach Claim |
+| Download-Buttons (Setup-UI) | OK | NEU v0.4.2: Content-Disposition, Browser-Download |
+| provision.conf inline | OK | NEU v0.4.2: Inhalt im Browser sichtbar + Copy-Button |
 
 ---
 
@@ -37,7 +41,7 @@ Der Server ist **stabil und produktionsbereit**. Version 0.4.0 wurde vollstaendi
 
 ```
 filesV3/
-├── server.py          # Hauptserver (~6000 Zeilen, FastAPI+SQLite)
+├── server.py          # Hauptserver (~6100 Zeilen, FastAPI+SQLite)
 ├── provision.db       # SQLite-Datenbank (NICHT in Git!)
 ├── requirements.txt   # fastapi, uvicorn, python-multipart, paramiko
 ├── CHANGELOG.md       # Versionshistorie
@@ -123,6 +127,22 @@ devices    (base_mac PK, hostname, role, board_name, model,
 
 ---
 
+## Download-Endpoints (v0.4.2)
+
+Alle drei Endpoints generieren Dateien **dynamisch** (kein statisches File noetig).
+Alle liefern `Content-Disposition: attachment` → Browser startet Download-Dialog.
+
+| Method | Path | Datei | Inhalt |
+|--------|------|-------|--------|
+| GET | `/download/99-provision.sh` | Bootstrap-Script | _generate_provision_sh() |
+| GET | `/download/provision.conf` | Server-Config | SERVER=URL + TOKEN |
+| GET | `/download/start.bat` | Windows-Starter | Env-Vars aus Server |
+
+`provision.conf` auto-erkennt Server-URL aus `request.base_url`.
+Optionaler Override: `?server=192.168.x.x` (Rueckwaertskompatibilitaet).
+
+---
+
 ## Bekannte Einschraenkungen / TODOs
 
 ### Mittel-Prioritaet
@@ -156,19 +176,21 @@ Server laeuft auf http://0.0.0.0:8000 - Admin-UI unter http://localhost:8000/ui/
 | Method | Path | Funktion |
 |--------|------|---------|
 | POST | `/api/claim` | Geraet registrieren |
-| GET | `/api/config/{mac}` | UCI-Script abrufen |
+| GET | `/api/config/{mac}?token=TOKEN` | UCI-Config fuer Geraet (Router-Auth) |
 | POST | `/api/deploy/{mac}/ssh-push` | SSH-Push (Background-Job) |
 | GET | `/api/deploy/job/{job_id}` | Job-Status pollen |
 | POST | `/api/discover` | Netzwerk-Scan |
 | POST | `/api/config-pull` | Config von Router holen |
 | POST | `/api/batch-push` | UCI-Batch an mehrere Router |
 | GET | `/api/devices` | Alle Geraete als JSON |
-| GET | `/api/config/{mac}` | NEU v0.4.1: UCI-Config fuer Geraet (token-auth, fuer Router) |
-| GET | `/api/projects` | NEU v0.4.0: Alle Projekte als JSON |
-| POST | `/api/config-push/preview` | NEU v0.4.0: UCI aus Projekt rendern |
-| POST | `/api/settings/ssh-key` | NEU v0.4.0: SSH-Key speichern |
-| GET | `/api/settings/ssh-key/status` | NEU v0.4.0: Key-Status |
-| POST | `/api/settings/ssh-key/install` | NEU v0.4.0: Key auf Router installieren |
+| GET | `/api/projects` | Alle Projekte als JSON |
+| POST | `/api/config-push/preview` | UCI aus Projekt rendern |
+| POST | `/api/settings/ssh-key` | SSH-Key speichern |
+| GET | `/api/settings/ssh-key/status` | Key-Status |
+| POST | `/api/settings/ssh-key/install` | Key auf Router installieren |
+| GET | `/download/99-provision.sh` | Bootstrap-Script (Download) |
+| GET | `/download/provision.conf` | Server-Config-Datei (Download) |
+| GET | `/download/start.bat` | Windows-Startskript (Download) |
 
 ---
 

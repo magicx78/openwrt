@@ -5,6 +5,31 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.2] – 2026-02-28
+
+### Behoben
+
+- **Download-Buttons im Setup-Assistenten funktionierten nicht** (Browser zeigte Inhalt
+  inline statt Download zu starten): Alle 3 Endpoints geben jetzt `Content-Disposition: attachment`
+  zurück → Browser startet immer einen Download-Dialog.
+  Betrifft: `GET /download/99-provision.sh`, `GET /download/provision.conf`,
+  `GET /download/start.bat`.
+
+- **`provision.conf`-Endpoint benötigte Query-Params** (`?server=...&token=...`):
+  Endpoint ermittelt Server-URL jetzt automatisch aus `request.base_url` (wie `99-provision.sh`).
+  Query-Param `?server=` bleibt als optionaler Override erhalten (Rückwärtskompatibilität).
+
+### Verbessert
+
+- **Setup-Assistent „Schritt 1"**: `provision.conf`-Inhalt mit echten Werten (Server-URL + Token)
+  direkt auf der Seite angezeigt. „📋 Kopieren"-Button und „⬇️ Download"-Link inline.
+  Kein manuelles Notepad mehr nötig – einfach kopieren und auf den Router übertragen.
+
+- **Download-Card**: Alle 3 Download-Links sauber aufgelistet mit Kurzbeschreibungen.
+  `provision.conf`-Link braucht keine Query-Params mehr.
+
+---
+
 ## [0.4.1] – 2026-02-28
 
 ### Behoben

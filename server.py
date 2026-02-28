@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -3238,7 +3238,7 @@ async def api_ssh_key_install(request: Request, db: sqlite3.Connection=Depends(g
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/ui/setup", response_class=HTMLResponse)
 def ui_setup(request: Request, db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin)):
-    server_ip = request.headers.get("host","192.168.10.69:8000").split(":")[0]
+    server_url = str(request.base_url).rstrip("/")
     projects  = db.execute("SELECT name FROM projects ORDER BY name").fetchall()
     proj_opts = "".join(f"<option value='{p['name']}'>{p['name']}</option>" for p in projects)
 
@@ -3259,13 +3259,15 @@ def ui_setup(request: Request, db: sqlite3.Connection=Depends(get_db), _=Depends
 <div class='grid2'>
 <div>
 <div class='card card-green'>
-<h3>📋 Schritt 1: provision.conf erstellen</h3>
-<p>Diese Datei muss auf den Router (<code>/etc/provision.conf</code>):</p>
-<pre>SERVER=http://{server_ip}:8000
+<h3>📋 Schritt 1: provision.conf</h3>
+<p>Diese Konfigurationsdatei muss auf den Router unter <code>/etc/provision.conf</code>:</p>
+<div style='display:flex;align-items:center;gap:.5em;margin-bottom:.4em'>
+  <b style='font-size:.9em'>Inhalt:</b>
+  <button class='btn' style='padding:.2em .7em;font-size:.8em' onclick='copyConf()'>📋 Kopieren</button>
+  <a class='btn' href='/download/provision.conf' style='padding:.2em .7em;font-size:.8em'>⬇️ Download</a>
+</div>
+<pre id='conf-preview' style='margin:0;user-select:all'>SERVER={server_url}
 TOKEN={ENROLLMENT_TOKEN}</pre>
-<p>Unter Windows erstellen:</p>
-<pre>notepad provision.conf</pre>
-<p>Inhalt eintragen, speichern als <code>provision.conf</code> (kein .txt!)</p>
 </div>
 
 <div class='card card-green'>
@@ -3285,11 +3287,22 @@ scp provision.conf  root@192.168.1.1:/etc/provision.conf</pre>
 
 <div>
 <div class='card'>
-<h3>⬇️ Script-Download</h3>
-<p>Lade die fertigen Dateien herunter:</p>
-<a class='btn btn-green' href='/download/99-provision.sh'>⬇️ 99-provision.sh</a><br><br>
-<a class='btn' href='/download/provision.conf?server={server_ip}&token={ENROLLMENT_TOKEN}'>⬇️ provision.conf</a><br><br>
-<a class='btn btn-orange' href='/download/start.bat'>⬇️ start.bat (Server starten)</a>
+<h3>⬇️ Downloads</h3>
+<p class='muted' style='font-size:.9em'>Alle Dateien werden vom Server dynamisch generiert – immer aktuell:</p>
+<div style='display:flex;flex-direction:column;gap:.6em;margin-top:.4em'>
+  <div style='display:flex;align-items:center;gap:.6em'>
+    <a class='btn btn-green' href='/download/99-provision.sh' style='white-space:nowrap'>⬇️ 99-provision.sh</a>
+    <span class='muted' style='font-size:.8em'>Bootstrap-Script (Enrollment + Config)</span>
+  </div>
+  <div style='display:flex;align-items:center;gap:.6em'>
+    <a class='btn' href='/download/provision.conf' style='white-space:nowrap'>⬇️ provision.conf</a>
+    <span class='muted' style='font-size:.8em'>Server-Adresse + Token</span>
+  </div>
+  <div style='display:flex;align-items:center;gap:.6em'>
+    <a class='btn btn-orange' href='/download/start.bat' style='white-space:nowrap'>⬇️ start.bat</a>
+    <span class='muted' style='font-size:.8em'>Server-Startskript (Windows)</span>
+  </div>
+</div>
 </div>
 
 <div class='card'>
@@ -3411,6 +3424,26 @@ async function quickInstall() {{
     }} catch(e) {{ done = true; }}
   }}
 }}
+
+function copyConf() {{
+  const text = document.getElementById('conf-preview').textContent;
+  navigator.clipboard.writeText(text).then(() => {{
+    const btns = document.querySelectorAll('[onclick="copyConf()"]');
+    btns.forEach(b => {{
+      const orig = b.textContent;
+      b.textContent = '✅ Kopiert!';
+      setTimeout(() => b.textContent = orig, 2000);
+    }});
+  }}).catch(() => {{
+    // Fallback: Text markieren
+    const el = document.getElementById('conf-preview');
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }});
+}}
 </script>"""
     return _page(content, "Setup", "/ui/setup")
 
@@ -3448,17 +3481,32 @@ async def api_quick_ssh(request: Request, db: sqlite3.Connection=Depends(get_db)
 def dl_provision_sh(request: Request, _=Depends(check_admin)):
     """Liefert das 99-provision.sh Bootstrap-Script dynamisch generiert."""
     server_url = str(request.base_url).rstrip("/")
-    return _generate_provision_sh(server_url, ENROLLMENT_TOKEN)
+    return PlainTextResponse(
+        _generate_provision_sh(server_url, ENROLLMENT_TOKEN),
+        headers={"Content-Disposition": 'attachment; filename="99-provision.sh"'}
+    )
 
 @app.get("/download/provision.conf", response_class=PlainTextResponse)
 def dl_provision_conf(request: Request, _=Depends(check_admin)):
-    server = request.query_params.get("server","192.168.10.69")
-    token  = request.query_params.get("token", ENROLLMENT_TOKEN)
-    return f"SERVER=http://{server}:8000\nTOKEN={token}\n"
+    """provision.conf dynamisch generiert – kein statisches File noetig."""
+    # Server-URL aus request.base_url ermitteln (kein Query-Param mehr noetig)
+    server_url = str(request.base_url).rstrip("/")
+    # Optionaler Override via ?server=... (Rueckwaertskompatibilitaet)
+    server_override = request.query_params.get("server", "")
+    if server_override:
+        # Falls server ohne Port, Standard-Port 8000 ergaenzen
+        if ":" not in server_override:
+            server_override = f"{server_override}:8000"
+        server_url = f"http://{server_override}"
+    return PlainTextResponse(
+        f"SERVER={server_url}\nTOKEN={ENROLLMENT_TOKEN}\n",
+        headers={"Content-Disposition": 'attachment; filename="provision.conf"'}
+    )
 
 @app.get("/download/start.bat", response_class=PlainTextResponse)
 def dl_start_bat(_=Depends(check_admin)):
-    return f"""@echo off
+    """start.bat dynamisch generiert mit aktuellen Env-Werten."""
+    content = f"""@echo off
 REM OpenWrt Provisioning Server – Startskript
 REM Anpassen: TOKEN und ADMIN_PASS aendern!
 
@@ -3474,6 +3522,10 @@ echo.
 C:\\Python313\\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8000
 pause
 """
+    return PlainTextResponse(
+        content,
+        headers={"Content-Disposition": 'attachment; filename="start.bat"'}
+    )
 
 @app.get("/provision.sh", response_class=PlainTextResponse)
 def get_provision_sh(request: Request):
