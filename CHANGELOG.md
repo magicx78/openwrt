@@ -5,6 +5,28 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.1] – 2026-02-28
+
+### Behoben
+
+- **„Router direkt provisionieren" schlägt fehl** (`provision script not found`):
+  `99-provision.sh` wurde als statische Datei erwartet – existierte nie.
+  Fix: `_generate_provision_sh()` generiert das Bootstrap-Script jetzt **dynamisch**
+  mit Server-URL und Enrollment-Token eingebettet.
+  - `GET /download/99-provision.sh` liefert jetzt ein vollständiges Shell-Script
+  - `POST /api/setup/quick-ssh` nutzt dasselbe generierte Script (kein Dateisystem-Zugriff mehr)
+
+- **`GET /api/config/{mac}` fehlte** (war in CONTINUE_PROMPT dokumentiert, aber nicht implementiert):
+  Neuer Endpoint – Router ruft ihn nach dem Claim auf um seine UCI-Config herunterzuladen.
+  Auth via `?token=ENROLLMENT_TOKEN`. Rendert Projekt-Template mit `build_vars()` + `render_template()`.
+
+### Hinzugefügt
+
+- `_generate_provision_sh(server_url, token)` – DRY-Hilfsfunktion für Bootstrap-Script-Generierung
+- `GET /api/config/{mac}?token=...` – UCI-Config-Endpoint für enrolled Geräte
+
+---
+
 ## [0.4.0] – 2026-02-28
 
 ### Hinzugefügt

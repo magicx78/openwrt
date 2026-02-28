@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1278,6 +1278,56 @@ _DEPLOY_FATAL_PATTERNS = [
 ]
 
 
+def _generate_provision_sh(server_url: str, token: str) -> str:
+    """Generiert das 99-provision.sh Bootstrap-Script dynamisch.
+    Wird von /download/99-provision.sh und /api/setup/quick-ssh genutzt."""
+    return f"""#!/bin/sh
+# OpenWrt Provisioning Bootstrap – auto-generiert
+# Fuhert Enrollment + UCI-Config-Download durch
+
+SERVER="{server_url}"
+TOKEN="{token}"
+
+[ -f /etc/provisioned ] && {{ echo "Bereits provisioned – skip"; exit 0; }}
+
+# MAC-Adresse ermitteln (br-lan bevorzugt, dann eth0, dann ip-Befehl)
+MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null \\
+   || cat /sys/class/net/eth0/address 2>/dev/null \\
+   || ip link show | awk '/ether/{{print $2; exit}}')
+MAC=$(echo "$MAC" | tr ':' '-' | tr '[:upper:]' '[:lower:]')
+
+HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null || echo "openwrt")
+BOARD=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")
+MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
+
+echo "Router: $HOSTNAME | MAC: $MAC | Board: $BOARD"
+echo "Server: $SERVER"
+
+# Schritt 1: Geraet beim Server registrieren (Claim)
+echo "Registriere Geraet..."
+wget -q -O /tmp/claim.json \\
+  --post-data "mac=$MAC&hostname=$HOSTNAME&board_name=$BOARD&model=$MODEL&token=$TOKEN" \\
+  "$SERVER/api/claim" 2>/dev/null && echo "OK Claim" || echo "WARN Claim fehlgeschlagen – weiter"
+
+# Schritt 2: UCI-Config laden
+echo "Lade Config..."
+wget -q -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN" 2>/dev/null
+
+if [ -s /tmp/provision.uci ]; then
+  echo "Wende UCI-Config an..."
+  uci batch < /tmp/provision.uci
+  uci commit
+  touch /etc/provisioned
+  echo "OK Provisioning abgeschlossen"
+  /etc/init.d/network restart 2>/dev/null || true
+else
+  echo "WARN Keine Config gefunden – Geraet im Dashboard, Config manuell zuweisen"
+  echo "     Dashboard: $SERVER/ui/"
+  touch /etc/provisioned
+fi
+"""
+
+
 def _get_saved_ssh_key() -> str:
     """Liest gespeicherten SSH-Private-Key aus der DB. Gibt '' zurück wenn nicht konfiguriert."""
     try:
@@ -2234,6 +2284,42 @@ def api_job_status(job_id: str, _=Depends(check_admin)):
     job = _ssh_jobs.get(job_id)
     if not job: raise HTTPException(404, "Job nicht gefunden")
     return job
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API: /api/config/{mac} – gerenderte UCI-Config für ein Gerät (Enrollment-Flow)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/config/{mac}", response_class=PlainTextResponse)
+def api_config_by_mac(mac: str, token: str = "", db: sqlite3.Connection = Depends(get_db)):
+    """Gibt die gerenderte UCI-Config für ein Gerät zurück.
+    Authentifizierung via ?token=ENROLLMENT_TOKEN (für Router-Zugriff ohne Basic-Auth).
+    Wird vom Bootstrap-Script (99-provision.sh) nach dem Claim aufgerufen."""
+    if token != ENROLLMENT_TOKEN:
+        raise HTTPException(401, "Unauthorized – falscher Token")
+    # MAC normalisieren: AA:BB:CC:DD:EE:FF oder aa-bb-cc-dd-ee-ff → aabbccddeeffe
+    mac_norm = mac.replace("-", "").replace(":", "").lower()
+    d = db.execute(
+        "SELECT * FROM devices WHERE LOWER(REPLACE(REPLACE(base_mac,':',''),'-',''))=?",
+        (mac_norm,)).fetchone()
+    if not d:
+        raise HTTPException(404, f"Gerät {mac} nicht gefunden – zuerst /api/claim aufrufen")
+    # Projekt + Template + Rolle laden (gleiche Logik wie /api/deploy/{mac}/ssh-push)
+    proj_row = db.execute("SELECT settings FROM projects WHERE name=?", (d["project"],)).fetchone()
+    settings = json.loads((proj_row["settings"] if proj_row else None) or "{}")
+    # Globale Settings als Fallback einmischen
+    global_s = get_settings(db)
+    merged   = {**global_s, **settings}
+    tpl_name = merged.get("template", "master")
+    tpl_row  = db.execute("SELECT content FROM templates WHERE name=?", (tpl_name,)).fetchone()
+    role_row = db.execute("SELECT overrides FROM roles WHERE name=?", (d["role"],)).fetchone()
+    vars_    = build_vars(merged, d["base_mac"], d["hostname"])
+    rendered = render_template(
+        tpl_row["content"] if tpl_row else "",
+        vars_,
+        role_row["overrides"] if role_row else "",
+        d["override"])
+    return rendered
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3258,8 +3344,12 @@ Oder hier für einen schnellen Erst-Deploy ohne Gerät in der DB:</p>
 <br>
 <p class='muted' style='font-size:.85em'>Welches Script soll installiert werden?</p>
 <select id='q-script' style='width:100%;margin-bottom:.7em'>
-  <option value='provision'>99-provision.sh (Standard-Provisioning)</option>
+  <option value='provision'>Bootstrap-Script (Enrollment + Config-Download)</option>
 </select>
+<p class='muted' style='font-size:.82em;margin:.3em 0 .8em'>
+  Das Script registriert das Gerät, lädt seine UCI-Config vom Server und wendet sie an.
+  Nach ~10s erscheint es im <a href='/ui/'>Dashboard</a> – danach Projekt zuweisen falls nötig.
+</p>
 <button class='btn btn-green' onclick='quickInstall()'>⚡ Script installieren</button>
 <div id='q-log-card' style='display:none;margin-top:.7em'>
 <pre id='q-log' style='min-height:80px;max-height:250px;overflow-y:auto;font-size:.8em'></pre>
@@ -3338,12 +3428,9 @@ async def api_quick_ssh(request: Request, db: sqlite3.Connection=Depends(get_db)
     precheck_only = bool(body.get("precheck_only", False))
     if not ip:
         raise HTTPException(400, "IP fehlt")
-    # 99-provision.sh laden
-    script_path = os.path.join(os.path.dirname(__file__), "99-provision.sh")
-    if os.path.exists(script_path):
-        script = open(script_path).read()
-    else:
-        script = "#!/bin/sh\necho 'provision script not found'\n"
+    # 99-provision.sh dynamisch generieren (kein statisches File mehr nötig)
+    server_url = str(request.base_url).rstrip("/")
+    script = _generate_provision_sh(server_url, ENROLLMENT_TOKEN)
     job_id = secrets.token_hex(8)
     _ssh_jobs[job_id] = {"status": "running", "log": "Starte...", "done": False,
                          "success": False, "precheck_only": precheck_only}
@@ -3358,11 +3445,10 @@ async def api_quick_ssh(request: Request, db: sqlite3.Connection=Depends(get_db)
 # Downloads
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/download/99-provision.sh", response_class=PlainTextResponse)
-def dl_provision_sh(_=Depends(check_admin)):
-    path = os.path.join(os.path.dirname(__file__), "99-provision.sh")
-    if os.path.exists(path):
-        return open(path).read()
-    return "# Datei nicht gefunden – bitte 99-provision.sh in denselben Ordner legen"
+def dl_provision_sh(request: Request, _=Depends(check_admin)):
+    """Liefert das 99-provision.sh Bootstrap-Script dynamisch generiert."""
+    server_url = str(request.base_url).rstrip("/")
+    return _generate_provision_sh(server_url, ENROLLMENT_TOKEN)
 
 @app.get("/download/provision.conf", response_class=PlainTextResponse)
 def dl_provision_conf(request: Request, _=Depends(check_admin)):

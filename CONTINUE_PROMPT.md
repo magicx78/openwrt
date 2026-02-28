@@ -163,6 +163,7 @@ Server laeuft auf http://0.0.0.0:8000 - Admin-UI unter http://localhost:8000/ui/
 | POST | `/api/config-pull` | Config von Router holen |
 | POST | `/api/batch-push` | UCI-Batch an mehrere Router |
 | GET | `/api/devices` | Alle Geraete als JSON |
+| GET | `/api/config/{mac}` | NEU v0.4.1: UCI-Config fuer Geraet (token-auth, fuer Router) |
 | GET | `/api/projects` | NEU v0.4.0: Alle Projekte als JSON |
 | POST | `/api/config-push/preview` | NEU v0.4.0: UCI aus Projekt rendern |
 | POST | `/api/settings/ssh-key` | NEU v0.4.0: SSH-Key speichern |
