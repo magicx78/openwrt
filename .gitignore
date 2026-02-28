@@ -1,0 +1,22 @@
+# Datenbank
+provision.db
+*.db
+
+# Credentials / Secrets
+start.bat
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# Claude intern
+.claude/
+
+# Logs
+*.log
