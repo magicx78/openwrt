@@ -4,7 +4,7 @@ OpenWrt Minimal Provisioning Server – FINAL VERSION
 FastAPI + SQLite | Projekte | Validierung | Push-Deploy | Script-Generator
 """
 
-import hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, subprocess, secrets, threading, time
+import asyncio, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, subprocess, secrets, threading, time
 from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -190,7 +190,7 @@ _MASTER_TEMPLATE = """\
 # Variablen: {{HOSTNAME}} {{MGMT_NET}} {{MGMT_SUFFIX}}
 #            {{GW}} {{DNS}} {{SSID}} {{WPA_PSK}}
 #            {{ENABLE_11R}} {{MOBILITY_DOMAIN}}
-#            {{MESH_BLOCK}}
+#            {{MESH_BLOCK}} {{WLAN_BLOCK}}
 # ═══════════════════════════════════════════════════
 
 # 🖥️ System
@@ -214,51 +214,8 @@ set network.lan.netmask='255.255.255.0'
 set network.lan.gateway='{{GW}}'
 add_list network.lan.dns='{{DNS}}'
 
-# 📡 WLAN 2.4G
-set wireless.radio0=wifi-device
-set wireless.radio0.type='mac80211'
-set wireless.radio0.band='2g'
-set wireless.radio0.htmode='HT40'
-set wireless.radio0.country='DE'
-set wireless.radio0.channel='auto'
-set wireless.radio0.disabled='0'
-
-set wireless.wlan0=wifi-iface
-set wireless.wlan0.device='radio0'
-set wireless.wlan0.mode='ap'
-set wireless.wlan0.ssid='{{SSID}}'
-set wireless.wlan0.encryption='sae-mixed'
-set wireless.wlan0.key='{{WPA_PSK}}'
-set wireless.wlan0.network='lan'
-set wireless.wlan0.ieee80211r='{{ENABLE_11R}}'
-set wireless.wlan0.mobility_domain='{{MOBILITY_DOMAIN}}'
-set wireless.wlan0.ft_over_ds='0'
-set wireless.wlan0.reassociation_deadline='1000'
-set wireless.wlan0.ieee80211k='1'
-set wireless.wlan0.ieee80211v='1'
-
-# 📡 WLAN 5G
-set wireless.radio1=wifi-device
-set wireless.radio1.type='mac80211'
-set wireless.radio1.band='5g'
-set wireless.radio1.htmode='VHT80'
-set wireless.radio1.country='DE'
-set wireless.radio1.channel='auto'
-set wireless.radio1.disabled='0'
-
-set wireless.wlan1=wifi-iface
-set wireless.wlan1.device='radio1'
-set wireless.wlan1.mode='ap'
-set wireless.wlan1.ssid='{{SSID}}'
-set wireless.wlan1.encryption='sae-mixed'
-set wireless.wlan1.key='{{WPA_PSK}}'
-set wireless.wlan1.network='lan'
-set wireless.wlan1.ieee80211r='{{ENABLE_11R}}'
-set wireless.wlan1.mobility_domain='{{MOBILITY_DOMAIN}}'
-set wireless.wlan1.ft_over_ds='0'
-set wireless.wlan1.reassociation_deadline='1000'
-set wireless.wlan1.ieee80211k='1'
-set wireless.wlan1.ieee80211v='1'
+# 📡 WLAN-Konfiguration (aus Projekt-WLANs generiert)
+{{WLAN_BLOCK}}
 
 # 🕸️ Mesh (nur wenn ENABLE_MESH=1)
 {{MESH_BLOCK}}
@@ -361,7 +318,11 @@ set network.Media.netmask='255.255.255.0'
 set network.Media.delegate='0'
 
 # ── VLAN 30: Works/VPN ───────────────────────────────────────────
-# Hinweis: UCI-Schnittstellenname "Worls" ist historisch – Änderung würde bestehende Geräte brechen
+# ⚠️  BREAKING CHANGE NOTICE (v0.3.0):
+#     UCI-Schnittstellenname "Worls" ist ein historischer Tippfehler für "Works".
+#     Eine Umbenennung würde alle bereits provisionierten Geräte brechen,
+#     da der UCI-Name in deren Flash gespeichert ist.
+#     Dokumentiert als known issue. Nicht umbenennen ohne vollständiges Re-Flash.
 # Arbeits-Netz + WireGuard VPN
 set network.Worls=interface
 set network.Worls.proto='static'
@@ -1473,6 +1434,66 @@ def _ssh_push_job(job_id: str, ip: str, user: str, password: str, script: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Geräte-Discovery: Netzwerk-Scan nach OpenWrt-Routern
+# ─────────────────────────────────────────────────────────────────────────────
+async def _scan_host(ip: str, timeout: float) -> dict:
+    """Prüft ob ein Host erreichbar ist und ob LuCI läuft."""
+    import time as _time
+    result = {"ip": ip, "port22": False, "port80": False, "luci": False, "latency_ms": None}
+    t0 = _time.monotonic()
+    for port in (80, 22):
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port), timeout=timeout
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            if port == 80:
+                result["port80"] = True
+            else:
+                result["port22"] = True
+        except Exception:
+            pass
+    result["latency_ms"] = round((_time.monotonic() - t0) * 1000)
+    # LuCI-Check: HTTP GET / → prüfe auf OpenWrt-Kennzeichen
+    if result["port80"]:
+        try:
+            import urllib.request as _ur
+            req = _ur.Request(f"http://{ip}/", headers={"User-Agent": "OpenWrtProvisioner/0.3"})
+            with _ur.urlopen(req, timeout=timeout) as resp:
+                body = resp.read(2048).decode("utf-8", errors="replace").lower()
+                if "luci" in body or "openwrt" in body or "sysauth" in body:
+                    result["luci"] = True
+        except Exception:
+            pass
+    return result
+
+async def _scan_subnet(subnet: str, timeout: float = 1.5) -> list:
+    """Scannt Subnet .1-.254 parallel auf OpenWrt-Geräte."""
+    subnet = subnet.rstrip(".")
+    tasks = [_scan_host(f"{subnet}.{i}", timeout) for i in range(1, 255)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    found = []
+    for r in results:
+        if isinstance(r, dict) and (r["port22"] or r["port80"]):
+            found.append(r)
+    found.sort(key=lambda x: int(x["ip"].split(".")[-1]))
+    return found
+
+@app.post("/api/discover")
+async def api_discover(request: Request, _=Depends(check_admin)):
+    """Netzwerk-Scan nach erreichbaren Hosts (OpenWrt-Router)."""
+    body = await request.json()
+    subnet = str(body.get("subnet", "192.168.10")).strip()
+    timeout = float(body.get("timeout", 1.5))
+    timeout = max(0.3, min(timeout, 5.0))  # Clamp: 0.3s – 5s
+    results = await _scan_subnet(subnet, timeout)
+    return {"subnet": subnet, "found": len(results), "results": results}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HTML-Grundgerüst
 # ─────────────────────────────────────────────────────────────────────────────
 def _page(content: str, title: str = "", active: str = "") -> HTMLResponse:
@@ -1535,6 +1556,7 @@ pre{{background:#161b22;padding:1em;border-radius:6px;overflow-x:auto;border:1px
   {_nav("/ui/devices","🖥️","Geräte")}
   <span class="sep">|</span>
   {_nav("/ui/config-pull","📥","Config-Pull")}
+  {_nav("/ui/discover","🔍","Discovery")}
   <span class="sep">|</span>
   {_nav("/ui/templates","📋","Templates")}
   {_nav("/ui/roles","🎭","Rollen")}
@@ -2312,6 +2334,12 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
         wlans = [{"ssid":"","psk":"","band":"2g+5g","encryption":"sae-mixed",
                   "vlan":"lan","r80211":"1","enabled":"1","label":"Haupt-WLAN"}]
 
+    # Netzwerk-Namen für VLAN-Dropdown ermitteln
+    net_names = list(s.get("networks", {}).keys()) if s.get("networks") else []
+    if not net_names:
+        net_names = ["lan", "Media", "Worls", "Guest"]
+    net_names_json = json.dumps(net_names)
+
     tab_buttons = ""
     tab_panels = ""
     for i, w in enumerate(wlans):
@@ -2329,6 +2357,7 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
             for v,l in [("1","aktiviert"),("0","deaktiviert")])
         en_opts = "".join(f"<option value='{v}' {'selected' if w.get('enabled','1')==v else ''}>{l}</option>"
             for v,l in [("1","aktiviert"),("0","deaktiviert")])
+        vlan_opts = "".join(f"<option value='{n}' {'selected' if n==w.get('vlan','lan') else ''}>{n}</option>" for n in net_names)
         remove_btn = f"<button type='button' class='btn btn-red' style='font-size:.8em;padding:.2em .6em' onclick='removeWlan({i})'>Entfernen</button>" if len(wlans)>1 else ""
 
         tab_panels += f"""
@@ -2344,7 +2373,7 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
       <tr><td>Passwort</td><td><input type='text' name='wlan_{i}_psk' value='{w.get("psk","")}' placeholder='Mind. 8 Zeichen'></td></tr>
       <tr><td>Frequenzband</td><td><select name='wlan_{i}_band'>{band_opts}</select></td></tr>
       <tr><td>Verschluesselung</td><td><select name='wlan_{i}_encryption'>{enc_opts}</select></td></tr>
-      <tr><td>VLAN/Netz</td><td><input type='text' name='wlan_{i}_vlan' value='{w.get("vlan","lan")}' placeholder='lan, Guest, Media ...'></td></tr>
+      <tr><td>VLAN/Netz</td><td><select name='wlan_{i}_vlan'>{vlan_opts}<option value='__custom__' style='font-style:italic'>Andere…</option></select></td></tr>
       <tr><td>802.11r Roaming</td><td><select name='wlan_{i}_r80211'>{r11_opts}</select></td></tr>
       <tr><td>Status</td><td><select name='wlan_{i}_enabled'>{en_opts}</select></td></tr>
     </table>
@@ -2377,6 +2406,74 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
             rows += f"<tr><td>{label}</td><td><input type='text' name='{key}' value='{val}' placeholder='{key}'></td><td class='muted' style='font-size:.85em'>{hint}</td></tr>"
     rows += f"<tr><td>Template-Datei</td><td><select name='template'>{tmpl_opts}</select></td><td class='muted'>uci-batch Template</td></tr>"
 
+    # Netzwerke aus Settings laden
+    networks = s.get("networks", {})
+    if not networks:
+        networks = {
+            "lan":   {"proto":"static","ipaddr":"192.168.10.X","netmask":"255.255.255.0","gateway":"","vlan":"10"},
+            "Media": {"proto":"static","ipaddr":"192.168.20.1","netmask":"255.255.255.0","gateway":"","vlan":"20"},
+            "Worls": {"proto":"static","ipaddr":"192.168.30.1","netmask":"255.255.255.0","gateway":"","vlan":"30"},
+            "Guest": {"proto":"static","ipaddr":"192.168.40.1","netmask":"255.255.255.0","gateway":"","vlan":"40"},
+        }
+
+    net_rows = ""
+    for nname, nconf in networks.items():
+        proto_opts = "".join(f"<option value='{v}' {'selected' if nconf.get('proto','static')==v else ''}>{v}</option>" for v in ["static","dhcp"])
+        net_rows += f"""
+<tr>
+  <td><input type='text' name='net_name_{nname}' value='{nname}' style='width:80px' placeholder='Name'></td>
+  <td><select name='net_proto_{nname}'>{proto_opts}</select></td>
+  <td><input type='text' name='net_ipaddr_{nname}' value='{nconf.get("ipaddr","")}' placeholder='192.168.X.1'></td>
+  <td><input type='text' name='net_netmask_{nname}' value='{nconf.get("netmask","255.255.255.0")}' placeholder='255.255.255.0' style='width:110px'></td>
+  <td><input type='text' name='net_gateway_{nname}' value='{nconf.get("gateway","")}' placeholder='leer=kein GW' style='width:110px'></td>
+  <td><input type='text' name='net_vlan_{nname}' value='{nconf.get("vlan","")}' placeholder='10' style='width:50px'></td>
+  <td><button type='button' class='btn btn-red' style='font-size:.75em;padding:.15em .4em' onclick='removeNetRow(this)'>−</button></td>
+</tr>"""
+
+    net_section = f"""
+<div class='card' id='net-config-card'>
+  <h3 style='color:#58a6ff;margin-top:0'>🌐 Netzwerk-Interfaces</h3>
+  <p class='muted' style='font-size:.85em'>IPs, VLANs und Gateways der Bridge-Interfaces (wird als Dropdown-Quelle für VLAN-Feld verwendet).</p>
+  <table style='width:100%'>
+    <thead><tr>
+      <th style='width:90px'>Name</th><th style='width:80px'>Protokoll</th>
+      <th>IP-Adresse</th><th>Netmask</th><th>Gateway</th><th style='width:55px'>VLAN</th><th style='width:35px'></th>
+    </tr></thead>
+    <tbody id='net-rows'>
+{net_rows}
+    </tbody>
+  </table>
+  <button type='button' class='btn btn-green' style='margin-top:.5em;font-size:.85em' onclick='addNetRow()'>+ Interface</button>
+  <input type='hidden' name='net_count' id='net_count' value='{len(networks)}'>
+  <input type='hidden' name='net_names_list' id='net_names_list' value='{",".join(networks.keys())}'>
+</div>
+<script>
+function removeNetRow(btn) {{
+  btn.closest('tr').remove();
+  updateNetCount();
+}}
+function addNetRow() {{
+  const tbody = document.getElementById('net-rows');
+  const nm = 'new_' + Date.now();
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type='text' name='net_name_${{nm}}' value='' style='width:80px' placeholder='Name'></td>
+    <td><select name='net_proto_${{nm}}'><option value='static' selected>static</option><option value='dhcp'>dhcp</option></select></td>
+    <td><input type='text' name='net_ipaddr_${{nm}}' placeholder='192.168.X.1'></td>
+    <td><input type='text' name='net_netmask_${{nm}}' value='255.255.255.0' style='width:110px'></td>
+    <td><input type='text' name='net_gateway_${{nm}}' placeholder='leer=kein GW' style='width:110px'></td>
+    <td><input type='text' name='net_vlan_${{nm}}' placeholder='10' style='width:50px'></td>
+    <td><button type='button' class='btn btn-red' style='font-size:.75em;padding:.15em .4em' onclick='removeNetRow(this)'>−</button></td>`;
+  tbody.appendChild(tr);
+  const nnl = document.getElementById('net_names_list');
+  nnl.value = (nnl.value ? nnl.value+',' : '') + nm;
+  updateNetCount();
+}}
+function updateNetCount() {{
+  document.getElementById('net_count').value = document.querySelectorAll('#net-rows tr').length;
+}}
+</script>"""
+
     content_html = f"""
 <h2>Projekt: {name}</h2>
 <div class='card card-blue'>
@@ -2400,6 +2497,8 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
     <span class='muted' style='font-size:.85em;margin-left:1em'>Aktuell: <span id='wlan-count-display'>{wlan_count}</span> WLAN(s)</span>
   </div>
 </div>
+
+{net_section}
 
 <div class='card'>
   <h3 style='color:#58a6ff;margin-top:0'>Netzwerk &amp; Sonstiges</h3>
@@ -2429,6 +2528,12 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
 
 <script>
 let wlanCount = {wlan_count};
+const NET_NAMES = {net_names_json};
+function renderVlanSelect(idx, val) {{
+  let opts = NET_NAMES.map(n => `<option value="${{n}}"${{n===val?' selected':''}}>${{n}}</option>`).join('');
+  opts += `<option value="__custom__" style="font-style:italic">Andere…</option>`;
+  return `<select name="wlan_${{idx}}_vlan">${{opts}}</select>`;
+}}
 
 function switchTab(idx) {{
   document.querySelectorAll('.wlan-panel').forEach(p => p.style.display='none');
@@ -2484,7 +2589,7 @@ function addWlan() {{
           <option value='sae'>SAE (WPA3 only)</option>
           <option value='none'>Offen</option>
         </select></td></tr>
-        <tr><td>VLAN/Netz</td><td><input type='text' name='wlan_${{idx}}_vlan' value='lan'></td></tr>
+        <tr><td>VLAN/Netz</td><td>${{renderVlanSelect(idx,'lan')}}</td></tr>
         <tr><td>802.11r Roaming</td><td><select name='wlan_${{idx}}_r80211'>
           <option value='1' selected>aktiviert</option><option value='0'>deaktiviert</option>
         </select></td></tr>
@@ -2540,6 +2645,23 @@ async def ui_project_save(name: str, request: Request,
         s["SSID"] = wlans[0].get("ssid","")
         s["WPA_PSK"] = wlans[0].get("psk","")
         s["ENABLE_11R"] = wlans[0].get("r80211","1")
+    # Netzwerk-Interfaces einlesen
+    net_names_list = str(form.get("net_names_list", ""))
+    new_networks = {}
+    for nname_key in [n.strip() for n in net_names_list.split(",") if n.strip()]:
+        # Name kann überschrieben worden sein
+        actual_name = str(form.get(f"net_name_{nname_key}", nname_key)).strip()
+        if not actual_name:
+            continue
+        new_networks[actual_name] = {
+            "proto":   str(form.get(f"net_proto_{nname_key}", "static")),
+            "ipaddr":  str(form.get(f"net_ipaddr_{nname_key}", "")),
+            "netmask": str(form.get(f"net_netmask_{nname_key}", "255.255.255.0")),
+            "gateway": str(form.get(f"net_gateway_{nname_key}", "")),
+            "vlan":    str(form.get(f"net_vlan_{nname_key}", "")),
+        }
+    if new_networks:
+        s["networks"] = new_networks
     db.execute("UPDATE projects SET description=?,settings=? WHERE name=?",
                (desc, json.dumps(s), name))
     db.commit()
@@ -2594,6 +2716,12 @@ def ui_template_new(name: str=Form(...), db: sqlite3.Connection=Depends(get_db),
 def ui_template_get(tname: str, db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin)):
     t = db.execute("SELECT * FROM templates WHERE name=?", (tname,)).fetchone()
     if not t: raise HTTPException(404)
+    worls_warn = ""
+    if "network.Worls" in (t['content'] or ''):
+        worls_warn = """<div class='card card-orange'>
+  ⚠️ <b>Bekannter Tippfehler:</b> Dieses Template verwendet <code>network.Worls</code> (historisch für "Works/VPN").
+  Umbenennung würde bestehende Geräte brechen. Absichtlich beibehalten – siehe CHANGELOG v0.3.0.
+</div>"""
     content = f"""
 <h2>📄 Template: {tname}</h2>
 <div class='card card-blue'>
@@ -2603,6 +2731,7 @@ def ui_template_get(tname: str, db: sqlite3.Connection=Depends(get_db), _=Depend
   <code>{{{{GW}}}}</code> <code>{{{{DNS}}}}</code> <code>{{{{SSID}}}}</code> <code>{{{{WPA_PSK}}}}</code>
   <code>{{{{ENABLE_11R}}}}</code> <code>{{{{MOBILITY_DOMAIN}}}}</code> <code>{{{{MESH_BLOCK}}}}</code>
 </div>
+{worls_warn}
 <form method="POST" action="/ui/templates/{tname}">
   <textarea name='content' rows='50'>{t['content'] or ''}</textarea><br><br>
   <input type='submit' value='💾 Speichern'>
@@ -5346,15 +5475,25 @@ async function doBatchPush(){
     const d=await r.json();
     jobMap=d.jobs||{};
   } else {
-    // Script-Methode: Jeder Router einzeln über /api/direct-push
-    // (verwendet uci batch, für echten Script-Push müsste MAC bekannt sein)
+    // Script-Methode: MAC-basiert über /api/deploy/{mac}/ssh-push
     for(const tgt of targets){
-      const r=await fetch('/api/direct-push',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({...tgt,uci_cmds,do_commit,do_reload,do_reboot})
-      });
-      const d=await r.json();
-      jobMap[tgt.ip]=d.job_id;
+      const mac=(tgt.mac||'').replace(/[^a-f0-9]/gi,'').toLowerCase();
+      if(!mac||mac==='unknown'||mac.length<12){
+        // Fallback: direct-push wenn keine MAC bekannt
+        const r=await fetch('/api/direct-push',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({...tgt,uci_cmds,do_commit,do_reload,do_reboot})
+        });
+        const d=await r.json();
+        jobMap[tgt.ip]=d.job_id;
+      } else {
+        const r=await fetch(`/api/deploy/${mac}/ssh-push`,{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ip:tgt.ip,user:tgt.user||'root',password:tgt.password||'',precheck:false})
+        });
+        const d=await r.json();
+        jobMap[tgt.ip]=d.job_id;
+      }
     }
   }
 
@@ -5398,3 +5537,83 @@ async function pollJob(jid){
 </script>
 """
     return _page(content, "Config Pull", "/ui/config-pull")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: Geräte-Discovery
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/ui/discover", response_class=HTMLResponse)
+def ui_discover(db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin)):
+    settings = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings").fetchall()}
+    default_subnet = settings.get("MGMT_NET", "192.168.10")
+    content = f"""
+<h2>🔍 Geräte-Discovery</h2>
+<div class='card card-blue'>
+  ℹ️ Scannt das Netzwerk auf erreichbare Hosts und erkennt OpenWrt-Router anhand von SSH (Port 22) und LuCI (Port 80).
+  Der Scan läuft parallel – dauert ca. Timeout-Sekunden.
+</div>
+<div class='card'>
+  <div style='display:flex;gap:1em;align-items:flex-end;flex-wrap:wrap'>
+    <div>
+      <label style='display:block;margin-bottom:.3em'>Subnetz (erste 3 Oktette)</label>
+      <input type='text' id='subnet-input' value='{default_subnet}' placeholder='192.168.10' style='width:180px'>
+    </div>
+    <div>
+      <label style='display:block;margin-bottom:.3em'>Timeout (Sekunden)</label>
+      <input type='number' id='timeout-input' value='1.5' min='0.5' max='5' step='0.5' style='width:80px'>
+    </div>
+    <button class='btn btn-teal' onclick='startScan()' id='scan-btn'>🔍 Scan starten</button>
+  </div>
+</div>
+<div id='scan-progress' style='display:none' class='card card-orange'>⏳ Scan läuft… bitte warten.</div>
+<div id='scan-results'></div>
+
+<script>
+async function startScan() {{
+  const subnet = document.getElementById('subnet-input').value.trim();
+  const timeout = parseFloat(document.getElementById('timeout-input').value)||1.5;
+  if(!subnet){{alert('Bitte Subnetz eingeben');return;}}
+  document.getElementById('scan-btn').disabled=true;
+  document.getElementById('scan-progress').style.display='block';
+  document.getElementById('scan-results').innerHTML='';
+  try {{
+    const r = await fetch('/api/discover', {{
+      method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{subnet, timeout}})
+    }});
+    const d = await r.json();
+    document.getElementById('scan-progress').style.display='none';
+    if(!d.results||d.results.length===0){{
+      document.getElementById('scan-results').innerHTML=`<div class='card card-orange'>⚠️ Keine Geräte in ${{subnet}}.0/24 gefunden.</div>`;
+      return;
+    }}
+    let rows='';
+    d.results.forEach(h=>{{
+      rows+=`<tr>
+        <td><b>${{h.ip}}</b></td>
+        <td>${{h.port22?'✅':'—'}}</td>
+        <td>${{h.port80?'✅':'—'}}</td>
+        <td>${{h.luci?'<span class="ok">✅ OpenWrt LuCI</span>':'—'}}</td>
+        <td class='muted'>${{h.latency_ms}}ms</td>
+        <td><button class='btn btn-green' style='font-size:.8em;padding:.2em .5em' onclick='openSsh("${{h.ip}}")'>📡 SSH</button></td>
+      </tr>`;
+    }});
+    document.getElementById('scan-results').innerHTML=`
+<div class='card card-green' style='margin-bottom:.5em'>✅ ${{d.found}} Gerät(e) gefunden in ${{subnet}}.0/24</div>
+<div class='card'>
+  <table>
+    <thead><tr><th>IP</th><th>SSH (22)</th><th>HTTP (80)</th><th>LuCI</th><th>Latenz</th><th>Aktion</th></tr></thead>
+    <tbody>${{rows}}</tbody>
+  </table>
+</div>`;
+  }}catch(e){{
+    document.getElementById('scan-progress').style.display='none';
+    document.getElementById('scan-results').innerHTML=`<div class='card card-red'>❌ Fehler: ${{e.message}}</div>`;
+  }}
+  document.getElementById('scan-btn').disabled=false;
+}}
+function openSsh(ip){{
+  window.location='/ui/setup?ip='+encodeURIComponent(ip);
+}}
+</script>"""
+    return _page(content, "Discovery", "/ui/discover")

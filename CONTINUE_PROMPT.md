@@ -1,180 +1,177 @@
-# 🤖 Continuation Prompt – OpenWrt Provisioning Server v0.2.0
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.3.0
 
-## Kontext
-
-Du arbeitest an einem **OpenWrt Minimal Provisioning Server** (`server.py`).
-FastAPI + SQLite, ~5400 Zeilen, aktuell **v0.2.0**.
+> Stand: 2026-02-28 | Datei: server.py (~5619 Zeilen) | DB: provision.db (SQLite)
 
 ---
 
-## Vollständiger Feature-Stand (v0.2.0)
+## Aktueller Status
 
-### ✅ Kern-Infrastruktur
-- FastAPI + SQLite (`provision.db`), HTTP Basic Auth, HMAC-Config, Enrollment-Token
-- Lifespan-basierte DB-Initialisierung mit Defaults
+Der Server ist **stabil und produktionsbereit**. Version 0.3.0 wurde vollstaendig implementiert.
 
-### ✅ Multi-WLAN-System (Projekt-Editor)
-- `wlans: [...]` Array pro Projekt
-- Tab-basierter Editor im Browser
-- `build_wlan_block()` → UCI aus wlans[] Array
-- Rückwärtskompatibel: erstes WLAN → `SSID`/`WPA_PSK`/`ENABLE_11R`
+### Was laeuft
 
-### ✅ SSH-Installer
-- Precheck (7 read-only Checks) + Precheck-only Modus
-- SSH-Auth: sshpass → paramiko → SSH-Key (plattformübergreifend)
-- Fatal-Output-Erkennung (`: not found`, `No such file`, etc.)
-- UTC-Timestamps überall: `now_utc()`, `_ts()`
+| Feature | Status | Details |
+|---------|--------|---------|
+| FastAPI-Server (HTTP Basic Auth) | OK | uvicorn, alle Routen aktiv |
+| SQLite-Datenbank | OK | devices, projects, templates, roles, settings |
+| Geraete-Enrollment | OK | POST /api/claim mit Token |
+| Template-Rendering | OK | {{VAR}}-Ersetzung, Master + Private Template |
+| Multi-WLAN-Projekte | OK | N WLANs pro Projekt, Tab-basierter Editor |
+| VLAN-Dropdown | OK | NEU v0.3.0: select statt text-input |
+| Netzwerk-Config-Editor | OK | NEU v0.3.0: IPs/VLANs/Gateways je Interface |
+| WLAN_BLOCK Master-Template | OK | NEU v0.3.0: kein hardcoded wlan0/wlan1 mehr |
+| SSH-Deploy | OK | /api/deploy/{mac}/ssh-push, precheck, jobs |
+| Script-Push (MAC-basiert) | OK | NEU v0.3.0: korrekt via /api/deploy/{mac}/ssh-push |
+| Config-Pull -> Edit -> Push | OK | /ui/config-pull, UCI-Parse, Batch-Push |
+| Geraete-Discovery | OK | NEU v0.3.0: /ui/discover, asyncio Scan, LuCI-Erkennung |
+| Diagnose (Server + SSH) | OK | /ui/diagnose/{mac} |
+| Rollen-Overrides | OK | ap1, node, repeater mit UCI-Overrides |
+| IP-Tracking | OK | last_ip in DB, SSH-Vorausfuellung |
+| network.Worls dokumentiert | OK | NEU v0.3.0: Breaking-Change-Warnung in UI + Code |
+| paramiko in requirements.txt | OK | NEU v0.3.0 |
 
-### ✅ Diagnose-System
-- `/ui/diagnose/{mac}` + `/api/diagnose/{mac}`
+---
 
-### ✅ Config-Pull → Edit → Direct-Push (NEU in v0.2.0)
+## Dateistruktur
 
-#### `/ui/config-pull` – 5-Schritt-Workflow
-1. Pull-Methode wählbar mit Erklärung (`uci export` empfohlen, `uci show` möglich)
-2. SSH-Pull: liest `wireless` + `network` read-only vom Quell-Router
-3. WLAN-Editor: Tab pro wifi-iface, SSID/Key/Enc/Netz(VLAN)/802.11r/k/v/MFP/WDS
-4. UCI-Vorschau + Raw-Config-Ansicht
-5. Optional als Projekt oder Template speichern
-6. Batch-Push auf mehrere Client-Router parallel (UCI-direct oder Script)
-
-#### Neue Backend-Funktionen
-```python
-_parse_uci_export(raw)           # UCI export → Dict
-_uci_show_to_export(raw)         # uci show → uci export Format
-_extract_wlans(parsed)           # wifi-iface → WLAN-Dicts
-_extract_radios(parsed)          # wifi-device → Radio-Dicts
-_extract_networks(parsed)        # interfaces → Netz-Dict
-_wlans_to_uci_set(wlans)        # WLANs → UCI set-Befehle
-_wlans_to_uci_template(wlans)   # WLANs → UCI-Template mit {{VAR}}
-_ssh_pull_job(...)               # Thread: Pull
-_direct_push_job(...)            # Thread: Direct-Push (uci batch + commit + reload)
 ```
-
-#### Alle API-Endpunkte (komplett)
-```
-# Claim & Config
-POST /api/claim
-GET  /api/config/{mac}
-
-# Deploy
-POST /api/deploy/{mac}/ssh-push
-GET  /api/deploy/job/{job_id}
-POST /ui/deploy/{mac}/push
-GET  /ui/deploy/{mac}
-GET  /ui/deploy/{mac}/ssh
-
-# Diagnose
-GET  /api/diagnose/{mac}
-POST /api/diagnose/{mac}/ssh
-GET  /api/diagnose/report/{id}.json
-GET  /api/diagnose/report/{id}.txt
-GET  /api/diagnose/report/{id}.config
-
-# Config-Pull (NEU v0.2.0)
-GET  /api/devices                              # Geräteliste als JSON
-POST /api/config-pull                          # Pull-Job starten
-GET  /api/config-pull/{id}                     # Status/Ergebnis
-GET  /api/config-pull/{id}/raw/{sub}           # Roh-UCI-Output
-POST /api/config-pull/{id}/save-project        # Als Projekt speichern
-POST /api/config-pull/{id}/save-template       # Als Template speichern
-POST /api/direct-push                          # UCI-batch → 1 Router
-POST /api/batch-push                           # UCI-batch → N Router
-
-# Setup
-POST /api/setup/quick-ssh
-GET  /api/status
-
-# UI-Seiten
-GET  /ui/
-GET  /ui/devices
-GET  /ui/devices/{mac}
-POST /ui/devices/{mac}
-POST /ui/devices/{mac}/delete
-GET  /ui/projects
-POST /ui/projects/new
-GET  /ui/projects/{name}
-POST /ui/projects/{name}/save
-POST /ui/projects/{name}/delete
-GET  /ui/templates
-GET  /ui/templates/{name}
-POST /ui/templates/{name}
-GET  /ui/roles
-POST /ui/roles/{name}
-GET  /ui/settings
-POST /ui/settings
-GET  /ui/setup
-GET  /ui/config-pull   ← NEU v0.2.0
-GET  /ui/diagnose/{mac}
-
-# Downloads
-GET  /download/99-provision.sh
-GET  /download/provision.conf
-GET  /download/start.bat
-GET  /provision.sh
+filesV3/
+├── server.py          # Hauptserver (~5619 Zeilen, FastAPI+SQLite)
+├── provision.db       # SQLite-Datenbank (NICHT in Git!)
+├── requirements.txt   # fastapi, uvicorn, python-multipart, paramiko
+├── CHANGELOG.md       # Versionshistorie
+├── CONTINUE_PROMPT.md # Diese Datei
+├── DEPLOY.md          # Deployment-Anleitung
+├── STATUS.md          # Feature-Status-Uebersicht
+├── start.bat          # Windows-Starter mit Env-Vars (NICHT in Git!)
+└── .gitignore         # provision.db, start.bat, __pycache__, .claude/
 ```
 
 ---
 
-## Datenbankschema
+## Datenbank-Schema
+
 ```sql
-settings  (key PK, value)
-roles     (name PK, description, overrides)
-templates (id, name UNIQUE, content, updated_at)
-projects  (name PK, description, created_at, settings JSON)
-devices   (base_mac PK, hostname, role, board_name, model,
-           last_seen, claimed, project, notes, override,
-           status, last_log)
+settings   (key PK, value)                    -- MGMT_NET, GW, DNS, SSID, ...
+roles      (name PK, description, overrides)  -- ap1, node, repeater
+templates  (id, name UNIQUE, content, updated_at)
+projects   (name PK, description, created_at, settings JSON)
+devices    (base_mac PK, hostname, role, board_name, model,
+            last_seen, last_ip, claimed, project, notes,
+            override, status, last_log)
 ```
 
-## Wichtige Globals / Konstanten
-```python
-__version__       = "0.2.0"
-_ssh_jobs         # dict: job_id → {status, log, done, success, precheck_only, ip}
-_pulled_configs   # dict: pull_id → {done, success, log, ip, wlans[], radios[], networks{}, ...}
-_diag_reports     # dict: report_id → {report, config}
-_DEPLOY_FATAL_PATTERNS = [": not found", "No such file", "Permission denied",
-                           "uci: Usage:", "ash: can't open", "provision script not found"]
-_PRECHECK_CMDS    # 7 read-only SSH-Checks
-_MAX_CMD_OUTPUT   = 8192
+### projects.settings JSON-Struktur (v0.3.0)
+
+```json
+{
+  "MGMT_NET": "192.168.10",
+  "GW": "192.168.10.1",
+  "DNS": "192.168.10.89",
+  "ENABLE_MESH": "0",
+  "template": "master",
+  "SSID": "...",
+  "WPA_PSK": "...",
+  "ENABLE_11R": "1",
+  "wlans": [
+    {
+      "label": "Haupt-WLAN",
+      "ssid": "MeinNetz",
+      "psk": "...",
+      "band": "2g+5g",
+      "encryption": "sae-mixed",
+      "vlan": "lan",
+      "r80211": "1",
+      "enabled": "1"
+    }
+  ],
+  "networks": {
+    "lan":   {"proto": "static", "ipaddr": "192.168.10.X", "netmask": "255.255.255.0", "gateway": "", "vlan": "10"},
+    "Media": {"proto": "static", "ipaddr": "192.168.20.1", "netmask": "255.255.255.0", "gateway": "", "vlan": "20"},
+    "Worls": {"proto": "static", "ipaddr": "192.168.30.1", "netmask": "255.255.255.0", "gateway": "", "vlan": "30"},
+    "Guest": {"proto": "static", "ipaddr": "192.168.40.1", "netmask": "255.255.255.0", "gateway": "", "vlan": "40"}
+  }
+}
 ```
 
-## SSH-Funktions-Stack
-```python
-_build_base_ssh(ip, user, pw, logline)              # Auth: sshpass > paramiko > key
-_ssh_exec(base, cmd, stdin_data, timeout)           # Ausführen (subprocess oder paramiko)
-_run_precheck(base, logline) → bool                 # 7 read-only Checks
-_ssh_push_job(...)                                  # Precheck + Script-Upload + Exec
-_direct_push_job(...)                               # UCI-batch + commit + reload/reboot
-_ssh_pull_job(...)                                  # uci export lesen + parsen
+---
+
+## Template-Variablen
+
+| Variable | Quelle |
+|----------|--------|
+| `{{HOSTNAME}}` | MAC-basiert (letztes Oktett) |
+| `{{MGMT_NET}}` | settings["MGMT_NET"] |
+| `{{MGMT_SUFFIX}}` | aus MAC berechnet |
+| `{{GW}}` | settings["GW"] |
+| `{{DNS}}` | settings["DNS"] |
+| `{{SSID}}` | wlans[0].ssid |
+| `{{WPA_PSK}}` | wlans[0].psk |
+| `{{ENABLE_11R}}` | wlans[0].r80211 |
+| `{{MOBILITY_DOMAIN}}` | SSID-Hash (4 Hex-Zeichen) |
+| `{{MESH_BLOCK}}` | UCI fuer Mesh-Radio (wenn ENABLE_MESH=1) |
+| `{{WLAN_BLOCK}}` | UCI fuer alle WLANs aus wlans[] |
+
+---
+
+## Bekannte Einschraenkungen / TODOs
+
+### Hoch-Prioritaet
+1. **Netzwerk-Editor -> Template-Rendering verbinden**: Die `networks{}`-Daten aus dem
+   Projekt-Editor werden noch nicht in `build_vars()` eingespeist. IPs aus dem
+   Netzwerk-Editor koennten zukuenftig direkt im Template-Rendering genutzt werden.
+
+2. **VLAN-Dropdown "Andere..." Option**: Wenn der Nutzer "Andere..." waehlt, erscheint
+   kein Freitext-Input. Fuer benutzerdefinierte VLAN-Namen fehlt noch ein JS-Handler.
+
+3. **SSH-Key-Upload in UI**: Aktuell nur Passwort-Auth ueber UI. SSH-Key kann nur
+   manuell per ~/.ssh/authorized_keys auf dem Router gesetzt werden.
+
+### Mittel-Prioritaet
+4. **Config-Pull History**: Kein Versionsverlauf fuer gepullte Konfigurationen.
+
+5. **Geraete-Discovery -> Auto-Import**: Discovery-Seite zeigt Geraete, aber
+   echter Import (POST /api/devices/import) fehlt noch.
+
+6. **2FA / Token-Auth**: Aktuell nur HTTP Basic Auth.
+
+### Niedrig-Prioritaet
+7. **network.Worls umbenennen**: Nur moeglich mit vollstaendigem Re-Flash aller
+   Geraete. Dokumentiert als known issue (CHANGELOG v0.3.0).
+
+---
+
+## Server starten (Entwicklung)
+
+```bat
+:: Windows (start.bat - lokal, NICHT in Git!)
+set ENROLLMENT_TOKEN=geheim
+set ADMIN_PASS=admin
+set HMAC_SECRET=supersecret
+python server.py
 ```
 
-## Starten
-```bash
-# Linux
-pip install fastapi uvicorn python-multipart paramiko
-uvicorn server:app --host 0.0.0.0 --port 8000
+Server laeuft auf http://0.0.0.0:8000 - Admin-UI unter http://localhost:8000/ui/
 
-# Windows
-start.bat   (Token + Passwort anpassen!)
-```
-Admin-UI: `http://localhost:8000/ui/`
-Config-Pull: `http://localhost:8000/ui/config-pull`
+---
 
-## ⚠️ Bekannte Einschränkungen / offene TODOs
-- **Script-Push-Methode** im Config-Pull UI ruft aktuell ebenfalls `/api/direct-push` auf
-  (UCI-batch). Echter Script-Upload via `/api/deploy/{mac}/ssh-push` erfordert bekannte MAC.
-- `network.Worls` (historischer Tippfehler für "Works") im Private-Template – breaking change, dokumentiert
-- Kein SSH-Key-Upload in der UI
-- Kein Batch-Deploy über klassische Script-Methode ohne MAC
-- Kein Gerät-Discovery / Netzwerk-Scan
-- Keine 2FA
-- Tests (pytest) nicht im Lieferumfang
+## Wichtige API-Endpoints (Kurzreferenz)
 
-## Nächste sinnvolle Aufgaben
-1. **Script-Push-Methode** korrekt implementieren (MAC-basiert via `/api/deploy/{mac}/ssh-push`)
-2. **Netzwerk-Config-Editor** – IPs, VLANs, Gateways aus `networks{}` editierbar machen
-3. **Pull-History** – mehrere Pulls vergleichen, versionieren
-4. **Geräte-Discovery** – Netzwerk-Scan nach OpenWrt-Routern
-5. **WLAN-Template `{{WLAN_BLOCK}}`** im Master-Template aktivieren
-6. **paramiko** in `requirements.txt` aufnehmen
+| Method | Path | Funktion |
+|--------|------|---------|
+| POST | `/api/claim` | Geraet registrieren |
+| GET | `/api/config/{mac}` | UCI-Script abrufen |
+| POST | `/api/deploy/{mac}/ssh-push` | SSH-Push (Background-Job) |
+| GET | `/api/deploy/job/{job_id}` | Job-Status pollen |
+| POST | `/api/discover` | Netzwerk-Scan |
+| POST | `/api/config-pull` | Config von Router holen |
+| POST | `/api/batch-push` | UCI-Batch an mehrere Router |
+| GET | `/api/devices` | Alle Geraete als JSON |
+
+---
+
+## Git / GitHub
+
+- Repo: `magicx78/openwrt` (privat)
+- Branch: `main`
+- **Nicht in Git**: `provision.db`, `start.bat`, `.claude/`, `__pycache__/`

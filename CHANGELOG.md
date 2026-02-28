@@ -5,6 +5,45 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.3.0] – 2026-02-28
+
+### Hinzugefügt
+- **F1 – VLAN/Netz als Dropdown** im Projekt-Editor: Das VLAN-Feld in der
+  WLAN-Konfiguration ist jetzt ein `<select>`-Dropdown (wie z.B. SSID).
+  Die verfügbaren Optionen werden aus `settings["networks"]` des Projekts
+  gelesen; Fallback auf Standardliste `["lan", "Media", "Worls", "Guest"]`.
+  Neue WLANs (per JS hinzugefügt) nutzen dasselbe Dropdown via `renderVlanSelect()`.
+- **F2 – Netzwerk-Config-Editor**: Neuer Tab „🌐 Netzwerk-Interfaces" im Projekt-Editor.
+  Zeigt alle konfigurierten Interfaces (Name, Protokoll, IP, Netmask, Gateway, VLAN-ID)
+  als editierbare Tabelle. Interfaces können hinzugefügt und entfernt werden.
+  Gespeichert als `settings["networks"]` in der Projekt-DB. Speist F1-Dropdown.
+- **F3 – Geräte-Discovery**: Neuer Menüpunkt „🔍 Discovery" in der Navigation.
+  Seite `/ui/discover` erlaubt Netzwerk-Scan nach erreichbaren Hosts.
+  Neuer API-Endpoint `POST /api/discover` mit `{subnet, timeout}`-Parameter.
+  Erkennt SSH (Port 22), HTTP (Port 80) und OpenWrt LuCI automatisch.
+  Scan läuft parallel via `asyncio.gather()` – keine zusätzlichen Abhängigkeiten.
+- **F4 – `{{WLAN_BLOCK}}` im Master-Template aktiviert**: Die hardcodierten
+  `wlan0`/`wlan1`-Stanzas wurden durch `{{WLAN_BLOCK}}` ersetzt. Das Master-Template
+  wird jetzt genau wie das Private-Template vollständig aus den Projekt-WLANs generiert.
+  Variable auch im Kopfkommentar des Templates dokumentiert.
+- **F7 – paramiko in requirements.txt**: `paramiko>=3.4.0` ergänzt.
+  War bereits im Code genutzt, fehlte aber als deklarierte Abhängigkeit.
+
+### Geändert
+- **F6 – Script-Push-Methode korrigiert**: Im Config-Pull-UI ruft der „Script"-Modus
+  jetzt korrekt `/api/deploy/{mac}/ssh-push` auf (MAC-basiert) statt `/api/direct-push`.
+  Fallback auf `/api/direct-push` bleibt erhalten wenn keine gültige MAC bekannt ist.
+
+### Dokumentiert (Breaking Change)
+- **F5 – `network.Worls` (historischer Tippfehler)**: Der UCI-Schnittstellenname
+  „Worls" (statt „Works") im Private-Template ist ein historischer Tippfehler.
+  **Eine Umbenennung würde alle bereits provisionierten Geräte brechen** (UCI-Name
+  ist im Flash gespeichert). Bleibt absichtlich erhalten.
+  - Erweiterter Kommentar im `_PRIVATE_TEMPLATE` (Zeile ~363)
+  - UI-Warnung im Template-Editor wenn Template `network.Worls` enthält
+
+---
+
 ## [0.1.0] – 2026-02-28
 
 ### Hinzugefügt
