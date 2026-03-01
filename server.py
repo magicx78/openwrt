@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1708,54 +1708,54 @@ def _status_badge(s: str) -> str:
     return f"<span class='badge {cls}'>{icons.get(s,'❓')} {s}</span>"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# API: /api/claim
+# API: /api/claim  –  akzeptiert JSON *und* application/x-www-form-urlencoded
+# (BusyBox-wget sendet form-encoded; curl/Browser senden JSON)
 # ─────────────────────────────────────────────────────────────────────────────
-class ClaimReq(BaseModel):
-    base_mac: str; board_name: Optional[str]="unknown"
-    model: Optional[str]="unknown"; token: str
-
 @app.post("/api/claim")
-def api_claim(req: ClaimReq, request: Request, db: sqlite3.Connection = Depends(get_db)):
-    if not secrets.compare_digest(req.token, ENROLLMENT_TOKEN):
-        raise HTTPException(403, "Invalid token")
-    mac = req.base_mac.lower().strip()
+async def api_claim(request: Request, db: sqlite3.Connection = Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        # JSON-Body (curl, Browser, JSON-Clients)
+        body       = await request.json()
+        # base_mac und mac beide akzeptieren
+        mac        = str(body.get("base_mac", body.get("mac", ""))).strip()
+        board_name = str(body.get("board_name", "unknown"))
+        model      = str(body.get("model", "unknown"))
+        token      = str(body.get("token", ""))
+    else:
+        # application/x-www-form-urlencoded (BusyBox-wget --post-data)
+        form       = await request.form()
+        mac        = str(form.get("base_mac", form.get("mac", ""))).strip()
+        board_name = str(form.get("board_name", "unknown"))
+        model      = str(form.get("model", "unknown"))
+        token      = str(form.get("token", ""))
+
+    if not mac:
+        raise HTTPException(400, "MAC fehlt")
+    if not secrets.compare_digest(token, ENROLLMENT_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # MAC normalisieren: "aa:bb:cc:dd:ee:ff" → "aa-bb-cc-dd-ee-ff"
+    mac = mac.lower().replace(":", "-")
+
     now       = now_utc().isoformat()
     client_ip = request.client.host if request.client else None
     existing  = db.execute("SELECT * FROM devices WHERE base_mac=?", (mac,)).fetchone()
-    suffix   = mac_suffix(mac)
-    hostname = existing["hostname"] if existing else f"ap-{suffix:03d}"
-    role     = existing["role"]     if existing else "node"
-    project  = existing["project"]  if existing else "default"
+    suffix    = mac_suffix(mac)
+    hostname  = existing["hostname"] if existing else f"ap-{suffix:03d}"
+    role      = existing["role"]     if existing else "node"
+    project   = existing["project"]  if existing else "default"
 
     if existing:
         db.execute("UPDATE devices SET last_seen=?,board_name=?,model=?,claimed=1,status=?,last_ip=? WHERE base_mac=?",
-                   (now, req.board_name, req.model, "provisioned", client_ip, mac))
+                   (now, board_name, model, "provisioned", client_ip, mac))
     else:
         db.execute("INSERT INTO devices(base_mac,hostname,role,board_name,model,last_seen,claimed,project,status,last_ip) VALUES(?,?,?,?,?,?,1,?,?,?)",
-                   (mac, hostname, role, req.board_name, req.model, now, project, "provisioned", client_ip))
+                   (mac, hostname, role, board_name, model, now, project, "provisioned", client_ip))
     db.commit()
 
-    device   = db.execute("SELECT * FROM devices WHERE base_mac=?", (mac,)).fetchone()
-    proj_row = db.execute("SELECT settings FROM projects WHERE name=?", (project,)).fetchone()
-    proj_s   = json.loads(proj_row["settings"] if proj_row else "{}")
-
-    # Projekt-Settings haben Vorrang vor globalen Settings
-    glob_s   = get_settings(db)
-    merged   = {**glob_s, **proj_s}
-    tmpl_name = proj_s.get("template","master")
-    tmpl_row  = db.execute("SELECT content FROM templates WHERE name=?", (tmpl_name,)).fetchone()
-    if not tmpl_row:
-        tmpl_row = db.execute("SELECT content FROM templates WHERE name='master'").fetchone()
-
-    role_row  = db.execute("SELECT overrides FROM roles WHERE name=?", (role,)).fetchone()
-    vars_     = build_vars(merged, mac, hostname)
-    rendered  = render_template(
-        tmpl_row["content"] if tmpl_row else "",
-        vars_, role_row["overrides"] if role_row else "", device["override"])
-
-    return {"hostname": hostname, "role": role, "project": project,
-            "mgmt_ip": f"{merged['MGMT_NET']}.{vars_['MGMT_SUFFIX']}",
-            "template": rendered, "hmac_sha256": sign_payload(rendered)}
+    return {"status": "claimed", "mac": mac,
+            "hostname": hostname, "role": role, "project": project}
 
 # API: Status-Update vom Client
 @app.post("/api/status")
@@ -2303,7 +2303,11 @@ def api_config_by_mac(mac: str, token: str = "", db: sqlite3.Connection = Depend
         "SELECT * FROM devices WHERE LOWER(REPLACE(REPLACE(base_mac,':',''),'-',''))=?",
         (mac_norm,)).fetchone()
     if not d:
-        raise HTTPException(404, f"Gerät {mac} nicht gefunden – zuerst /api/claim aufrufen")
+        from fastapi.responses import JSONResponse as _JSONResponse
+        return _JSONResponse(
+            {"error": "device_not_claimed", "mac": mac,
+             "hint": "Geraet zuerst per /api/claim registrieren"},
+            status_code=404)
     # Projekt + Template + Rolle laden (gleiche Logik wie /api/deploy/{mac}/ssh-push)
     proj_row = db.execute("SELECT settings FROM projects WHERE name=?", (d["project"],)).fetchone()
     settings = json.loads((proj_row["settings"] if proj_row else None) or "{}")
@@ -3283,6 +3287,20 @@ scp provision.conf  root@192.168.1.1:/etc/provision.conf</pre>
 <pre>ssh root@192.168.1.1 "chmod +x /etc/uci-defaults/99-provision && sh /etc/uci-defaults/99-provision"</pre>
 <p>→ Router erscheint danach im <a href='/ui/'>Dashboard</a></p>
 </div>
+
+<div class='card card-blue'>
+<h3>📦 Benötigte Image-Pakete</h3>
+<p class='muted' style='font-size:.85em'>OpenWrt-Image mit diesen Paketen bauen (ImageBuilder):</p>
+<div style='display:flex;align-items:center;gap:.5em;margin-bottom:.4em'>
+  <b style='font-size:.9em'>PACKAGES:</b>
+  <button class='btn' style='padding:.2em .7em;font-size:.8em' onclick='copyPkgs()'>📋 Kopieren</button>
+</div>
+<pre id='pkg-line' style='margin:0 0 .5em;user-select:all;font-size:.82em'>wpad-wolfssl kmod-batman-adv batctl-full openssh-sftp-server -wpad-basic-mbedtls</pre>
+<p class='muted' style='font-size:.8em;margin:0'>
+  <b style='color:#c00'>-wpad-basic-mbedtls</b> → aus Image entfernen (Konflikt mit wpad-wolfssl)<br>
+  ImageBuilder: <code>make image PACKAGES="..."</code>
+</p>
+</div>
 </div>
 
 <div>
@@ -3345,6 +3363,11 @@ Oder hier für einen schnellen Erst-Deploy ohne Gerät in der DB:</p>
   <tr><td style='width:130px'>🌐 IP</td><td><input type='text' id='q-ip' value='192.168.1.1' style='width:100%'></td></tr>
   <tr><td>👤 Benutzer</td><td><input type='text' id='q-user' value='root' style='width:100%'></td></tr>
   <tr><td>🔑 Passwort</td><td><input type='password' id='q-pass' style='width:100%'></td></tr>
+  <tr><td>🖥️ Server-URL</td><td>
+    <input type='text' id='q-server-url' value='{server_url}' style='width:100%'>
+    <span class='muted' style='font-size:.78em'>URL die der Router erreichen kann
+    (z.B. http://192.168.1.100:8000 wenn Router noch im 192.168.1.x-Netz ist)</span>
+  </td></tr>
   <tr><td>🔍 Precheck</td><td><label style='cursor:pointer'>
     <input type='checkbox' id='q-precheck' style='width:auto;margin-right:.4em'>
     Precheck aktivieren (read-only vor Deploy)
@@ -3391,15 +3414,15 @@ async function quickInstall() {{
   const ip            = document.getElementById('q-ip').value;
   const user          = document.getElementById('q-user').value;
   const pass          = document.getElementById('q-pass').value;
+  const server_url    = document.getElementById('q-server-url').value;
   const precheck      = document.getElementById('q-precheck').checked;
   const precheck_only = document.getElementById('q-precheck-only').checked;
   document.getElementById('q-log-card').style.display = 'block';
   document.getElementById('q-log').textContent = 'Verbinde zu ' + ip + '...';
-  // Quick-Install ohne MAC: nutze einen Dummy-Request
   const resp = await fetch('/api/setup/quick-ssh', {{
     method: 'POST',
     headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ip, user, password: pass, precheck, precheck_only}})
+    body: JSON.stringify({{ip, user, password: pass, server_url, precheck, precheck_only}})
   }});
   const data = await resp.json();
   if (!data.job_id) {{
@@ -3444,6 +3467,25 @@ function copyConf() {{
     sel.addRange(range);
   }});
 }}
+
+function copyPkgs() {{
+  const text = document.getElementById('pkg-line').textContent;
+  navigator.clipboard.writeText(text).then(() => {{
+    const btns = document.querySelectorAll('[onclick="copyPkgs()"]');
+    btns.forEach(b => {{
+      const orig = b.textContent;
+      b.textContent = '✅ Kopiert!';
+      setTimeout(() => b.textContent = orig, 2000);
+    }});
+  }}).catch(() => {{
+    const el = document.getElementById('pkg-line');
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }});
+}}
 </script>"""
     return _page(content, "Setup", "/ui/setup")
 
@@ -3461,8 +3503,11 @@ async def api_quick_ssh(request: Request, db: sqlite3.Connection=Depends(get_db)
     precheck_only = bool(body.get("precheck_only", False))
     if not ip:
         raise HTTPException(400, "IP fehlt")
-    # 99-provision.sh dynamisch generieren (kein statisches File mehr nötig)
-    server_url = str(request.base_url).rstrip("/")
+    # server_url: kann vom Admin angegeben werden (falls Router anderes Subnet)
+    # Fallback: request.base_url (Admin-URL)
+    custom_server_url = body.get("server_url", "").strip()
+    server_url = custom_server_url if custom_server_url else str(request.base_url).rstrip("/")
+    # 99-provision.sh dynamisch generieren (kein statisches File noetig)
     script = _generate_provision_sh(server_url, ENROLLMENT_TOKEN)
     job_id = secrets.token_hex(8)
     _ssh_jobs[job_id] = {"status": "running", "log": "Starte...", "done": False,

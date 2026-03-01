@@ -5,6 +5,44 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.3] – 2026-03-01
+
+### Behoben
+
+- **Claim schlägt still fehl – Router erscheint nie im Dashboard** (`WARN Claim fehlgeschlagen – weiter`):
+  Doppelter Bug in `/api/claim`:
+  - **Field-Name-Mismatch**: BusyBox-wget sendet `mac=...`, API erwartete `base_mac` (422).
+  - **Content-Type-Mismatch**: BusyBox-wget sendet `application/x-www-form-urlencoded`,
+    Pydantic-Body erwartet `application/json` (422).
+
+  **Fix (server-seitig, robuster)**: `/api/claim` akzeptiert jetzt **beide Formate**:
+  - `application/json`: `base_mac` **und** `mac` (Alias) werden akzeptiert.
+  - `application/x-www-form-urlencoded`: `mac` oder `base_mac`, form-encoded (BusyBox-wget).
+
+  MAC wird normalisiert: `aa:bb:cc:dd:ee:ff` → `aa-bb-cc-dd-ee-ff`.
+  Response vereinfacht: `{"status": "claimed", "mac": "...", "hostname": "...", ...}`.
+  Provision-Script (`_generate_provision_sh`) bleibt **unverändert** – kein Router-Update nötig.
+
+- **`/api/config/{mac}` – 404 schwer zu debuggen**:
+  Bei nicht gefundenem Gerät jetzt JSON-Response statt Plain-Text-404:
+  `{"error": "device_not_claimed", "mac": "...", "hint": "..."}`
+
+### Hinzugefügt
+
+- **Setup-Assistent: „🖥️ Server-URL"-Feld** im SSH-Schnellinstaller.
+  Frischer Router (192.168.1.1) hat keine Route ins Admin-Netz (192.168.10.x).
+  Admin kann jetzt die URL angeben, die der Router tatsächlich erreichen kann
+  (z.B. `http://192.168.1.100:8000` wenn PC im 192.168.1.x-Netz ist).
+  Default: aktuelle Admin-URL aus `request.base_url`. Wird als `server_url` an
+  `/api/setup/quick-ssh` übergeben → in Provision-Script eingebettet.
+
+- **Setup-Assistent: „📦 Benötigte Image-Pakete"-Card** mit Copy-Button.
+  Erforderliche OpenWrt Image-Builder-Pakete:
+  `wpad-wolfssl kmod-batman-adv batctl-full openssh-sftp-server -wpad-basic-mbedtls`
+  Hinweis: `-wpad-basic-mbedtls` entfernen (Konflikt mit wpad-wolfssl).
+
+---
+
 ## [0.4.2] – 2026-02-28
 
 ### Behoben

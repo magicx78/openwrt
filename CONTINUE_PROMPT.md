@@ -1,6 +1,6 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.2
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.3
 
-> Stand: 2026-02-28 | Datei: server.py (~6100 Zeilen) | DB: provision.db (SQLite)
+> Stand: 2026-03-01 | Datei: server.py (~6100 Zeilen) | DB: provision.db (SQLite)
 
 ---
 
@@ -34,6 +34,9 @@ Der Server ist **stabil und produktionsbereit**. Version 0.4.2 wurde vollstaendi
 | /api/config/{mac} | OK | NEU v0.4.1: UCI-Config fuer Router nach Claim |
 | Download-Buttons (Setup-UI) | OK | NEU v0.4.2: Content-Disposition, Browser-Download |
 | provision.conf inline | OK | NEU v0.4.2: Inhalt im Browser sichtbar + Copy-Button |
+| /api/claim JSON+Form-Data | OK | NEU v0.4.3: BusyBox-wget kompatibel (beides akzeptiert) |
+| Server-URL-Feld SSH-Installer | OK | NEU v0.4.3: Router-Subnet-Problem lösen |
+| Image-Pakete-Card Setup-UI | OK | NEU v0.4.3: wpad-wolfssl, kmod-batman-adv etc. |
 
 ---
 
