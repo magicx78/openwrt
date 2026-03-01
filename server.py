@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1283,10 +1283,9 @@ def _generate_provision_sh(server_url: str, token: str) -> str:
     Wird von /download/99-provision.sh und /api/setup/quick-ssh genutzt."""
     return f"""#!/bin/sh
 # OpenWrt Provisioning Bootstrap – auto-generiert
-# Fuhert Enrollment + UCI-Config-Download durch
 
 SERVER="{server_url}"
-TOKEN="{token}"
+TOKEN='{token}'
 
 [ -f /etc/provisioned ] && {{ echo "Bereits provisioned – skip"; exit 0; }}
 
@@ -1296,35 +1295,33 @@ MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null \\
    || ip link show | awk '/ether/{{print $2; exit}}')
 MAC=$(echo "$MAC" | tr ':' '-' | tr '[:upper:]' '[:lower:]')
 
-HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null || echo "openwrt")
 BOARD=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")
 MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
 
-echo "Router: $HOSTNAME | MAC: $MAC | Board: $BOARD"
+echo "MAC: $MAC | Board: $BOARD | Model: $MODEL"
 echo "Server: $SERVER"
 
-# Schritt 1: Geraet beim Server registrieren (Claim) – JSON mit base_mac
-echo "Registriere Geraet..."
-wget -q -O /tmp/claim.json \\
-  --header "Content-Type: application/json" \\
-  --post-data "{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}" \\
-  "$SERVER/api/claim" 2>/dev/null && echo "OK Claim" || echo "WARN Claim fehlgeschlagen – weiter"
+echo "Claim..."
+CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
+wget -q -O /tmp/claim.json --header='Content-Type: application/json' --post-data "$CLAIM_JSON" "$SERVER/api/claim"
+echo "CLAIM_RC:$?"
+[ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
 
-# Schritt 2: UCI-Config laden
-echo "Lade Config..."
+echo "Config..."
 wget -q -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN" 2>/dev/null
+echo "CFG_RC:$? SIZE:$(wc -c </tmp/provision.uci 2>/dev/null || echo 0)"
 
 if [ -s /tmp/provision.uci ]; then
-  echo "Wende UCI-Config an..."
+  echo "Apply..."
   uci batch < /tmp/provision.uci
   uci commit
   touch /etc/provisioned
-  echo "OK Provisioning abgeschlossen"
   /etc/init.d/network restart 2>/dev/null || true
+  echo "OK"
 else
-  echo "WARN Keine Config gefunden – Geraet im Dashboard, Config manuell zuweisen"
-  echo "     Dashboard: $SERVER/ui/"
-  touch /etc/provisioned
+  echo "FAIL: Keine Config (nicht provisioned gesetzt!)"
+  echo "     Dashboard: $SERVER/ui/ – Projekt zuweisen, dann erneut booten"
+  exit 1
 fi
 """
 

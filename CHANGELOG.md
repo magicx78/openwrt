@@ -5,6 +5,40 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.5] – 2026-03-01
+
+### Behoben
+
+- **`_generate_provision_sh()` – drei kritische Bugs im generierten Script**:
+
+  1. **BusyBox `--header`-Syntax**: BusyBox wget erfordert `--header='KEY: VALUE'`
+     (Gleichzeichen-Syntax), nicht `--header "KEY: VALUE"` (Leerzeichen). Das alte
+     Format wurde von BusyBox stillschweigend ignoriert → JSON-Body ohne Content-Type
+     → FastAPI parsete ihn als Form-Data → Claim-Fehler.
+     **Fix**: `--header='Content-Type: application/json'` (korrekte BusyBox-Syntax).
+
+  2. **`CLAIM_JSON` als separate Variable**: Statt Inline-Post-Data mit Escape-Hölle
+     wird der JSON-Body jetzt als Variable gebaut und per `--post-data "$CLAIM_JSON"`
+     übergeben. Saubererer Code, einfacher zu debuggen.
+
+  3. **Selbstsabotage: `touch /etc/provisioned` im Fehlerfall**: Das Script setzte
+     `/etc/provisioned` auch dann, wenn **keine Config gefunden** wurde. Beim nächsten
+     Boot übersprang das Script dann komplett mit „Bereits provisioned – skip" – das
+     Gerät blieb für immer ohne Config.
+     **Fix**: `touch /etc/provisioned` **nur** bei erfolgreich angewendeter UCI-Config.
+     Im Fehlerfall: `exit 1` (kein provisioned-Flag) → Script läuft beim nächsten Boot erneut.
+
+  4. **TOKEN in Single-Quotes**: `TOKEN='{token}'` verhindert Shell-Interpretation von
+     Sonderzeichen (z. B. `$`) im Token-Wert.
+
+  5. **Diagnose-Output**: Neue Ausgaben `CLAIM_RC:$?`, `CFG_RC:$? SIZE:...` und
+     `head -n 20 /tmp/claim.json` für einfacheres Debugging im SSH-Installer-Log.
+
+  6. **`HOSTNAME`-Variable entfernt**: War nie Teil des Claim-Requests (API ignoriert es),
+     wurde nur in einem `echo` genutzt.
+
+---
+
 ## [0.4.4] – 2026-03-01
 
 ### Behoben
