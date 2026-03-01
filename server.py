@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.9"
+__version__ = "0.5.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1282,99 +1282,136 @@ def _generate_provision_sh(server_url: str, token: str) -> str:
     """Generiert das 99-provision.sh Bootstrap-Script dynamisch.
     Wird von /download/99-provision.sh und /api/setup/quick-ssh genutzt."""
     return f"""#!/bin/sh
-# OpenWrt Provisioning Bootstrap – auto-generiert
+# OpenWrt Provisioning Bootstrap v0.5.0 – auto-generiert
 
+# ─── Konfiguration (Defaults; /etc/provision.conf ueberschreibt) ──────────────
 SERVER="{server_url}"
 TOKEN='{token}'
+[ -f /etc/provision.conf ] && . /etc/provision.conf
 
-[ -f /etc/provisioned ] && {{ echo "Bereits provisioned – skip"; exit 0; }}
+# ─── Logging (stdout + /tmp/provision.log) ────────────────────────────────────
+LOG=/tmp/provision.log
+log() {{ echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }}
+log "=== Provisioning Start v0.5.0 ==="
+log "SERVER=$SERVER"
 
-# MAC-Adresse ermitteln (br-lan bevorzugt, dann eth0, dann ip-Befehl)
+# ─── Idempotenz ───────────────────────────────────────────────────────────────
+[ -f /etc/provisioned ] && {{ log "Bereits provisioned – skip"; exit 0; }}
+
+# ─── MAC / Board / Model ──────────────────────────────────────────────────────
 MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null \\
    || cat /sys/class/net/eth0/address 2>/dev/null \\
    || ip link show | awk '/ether/{{print $2; exit}}')
 MAC=$(echo "$MAC" | tr ':' '-' | tr '[:upper:]' '[:lower:]')
-
 BOARD=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")
 MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
+log "MAC=$MAC BOARD=$BOARD MODEL=$MODEL"
 
-echo "MAC: $MAC | Board: $BOARD | Model: $MODEL"
-echo "Server: $SERVER"
-
-# HTTP-Client bestimmen: wget (mit --header) bevorzugt, dann curl, sonst Abbruch
-if wget --help 2>&1 | grep -q -- '--header'; then
-  HTTP_CLIENT=wget
-elif command -v curl >/dev/null 2>&1; then
+# ─── HTTP-Client: curl bevorzugt (HTTP-Status pruefbar), dann wget ────────────
+if command -v curl >/dev/null 2>&1; then
   HTTP_CLIENT=curl
+elif wget --help 2>&1 | grep -q -- '--header'; then
+  HTTP_CLIENT=wget
 else
-  echo "FAIL: Kein JSON-POST moeglich (wget ohne --header und kein curl). Installiere curl oder erweitere den Server."
+  log "FAIL: Kein JSON-POST moeglich (kein curl, wget ohne --header). Installiere curl."
   exit 1
 fi
-echo "HTTP_CLIENT: $HTTP_CLIENT"
+log "HTTP_CLIENT=$HTTP_CLIENT"
 
-# Schritt 1: Claim – JSON-POST, kein Form-Data-Fallback
-echo "Claim..."
+# ─── Schritt 1: Claim – JSON-POST, niemals Form-Data ─────────────────────────
+log "Claim..."
 CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
-if [ "$HTTP_CLIENT" = "wget" ]; then
+if [ "$HTTP_CLIENT" = "curl" ]; then
+  CLAIM_HTTP_CODE=$(curl -sS -w "%{{http_code}}" \\
+    -o /tmp/claim.json \\
+    -H 'Content-Type: application/json' \\
+    -d "$CLAIM_JSON" \\
+    "$SERVER/api/claim" 2>>"$LOG")
+  CLAIM_RC=$?
+else
   wget -O /tmp/claim.json \\
     --header='Content-Type: application/json' \\
     --post-data "$CLAIM_JSON" \\
-    "$SERVER/api/claim"
-else
-  curl -sS -o /tmp/claim.json \\
-    -H 'Content-Type: application/json' \\
-    -d "$CLAIM_JSON" \\
-    "$SERVER/api/claim"
+    "$SERVER/api/claim" 2>>"$LOG"
+  CLAIM_RC=$?
+  CLAIM_HTTP_CODE="n/a"
 fi
-CLAIM_RC=$?
-echo "CLAIM_RC:$CLAIM_RC"
-[ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
+log "CLAIM_RC=$CLAIM_RC CLAIM_HTTP_CODE=$CLAIM_HTTP_CODE"
+[ -s /tmp/claim.json ] && log "CLAIM_RESP: $(head -c 200 /tmp/claim.json)"
 if [ "$CLAIM_RC" != "0" ]; then
-  echo "FAIL: Claim fehlgeschlagen (RC:$CLAIM_RC) – Provisioning abgebrochen"
-  exit 1
+  log "FAIL: Claim fehlgeschlagen (RC=$CLAIM_RC)"; exit 1
+fi
+if [ "$HTTP_CLIENT" = "curl" ]; then
+  case "$CLAIM_HTTP_CODE" in
+    2*) ;;
+    *)  log "FAIL: Claim HTTP $CLAIM_HTTP_CODE – kein 2xx"; exit 1 ;;
+  esac
 fi
 if [ ! -s /tmp/claim.json ]; then
-  echo "FAIL: Claim-Antwort leer – Server erreichbar aber keine Antwort?"
-  exit 1
+  log "FAIL: Claim-Antwort leer"; exit 1
 fi
 
-# Schritt 2: Config laden – HTTP-Fehler sichtbar, kein -q/-s
-echo "Config..."
-if [ "$HTTP_CLIENT" = "wget" ]; then
-  wget -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
+# ─── Schritt 2: Config laden – Validierung auf mehreren Ebenen ────────────────
+log "Config Download..."
+if [ "$HTTP_CLIENT" = "curl" ]; then
+  CFG_HTTP_CODE=$(curl -sS -w "%{{http_code}}" \\
+    -o /tmp/provision.uci \\
+    "$SERVER/api/config/$MAC?token=$TOKEN" 2>>"$LOG")
+  CFG_RC=$?
 else
-  curl -o /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
+  wget -O /tmp/provision.uci \\
+    "$SERVER/api/config/$MAC?token=$TOKEN" 2>>"$LOG"
+  CFG_RC=$?
+  CFG_HTTP_CODE="n/a"
 fi
-CFG_RC=$?
-SIZE=$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)
-echo "CFG_RC:$CFG_RC"
-echo "CFG_SIZE:$SIZE"
-
-# Schritt 3: Config anwenden – provisioned nur bei vollstaendigem Erfolg
-if [ -s /tmp/provision.uci ]; then
-  echo "Apply..."
-  uci batch < /tmp/provision.uci
-  BATCH_RC=$?
-  echo "BATCH_RC:$BATCH_RC"
-  if [ "$BATCH_RC" != "0" ]; then
-    echo "FAIL: uci batch fehlgeschlagen – provisioned NICHT gesetzt"
-    exit 1
-  fi
-  uci commit
-  COMMIT_RC=$?
-  echo "COMMIT_RC:$COMMIT_RC"
-  if [ "$COMMIT_RC" != "0" ]; then
-    echo "FAIL: uci commit fehlgeschlagen – provisioned NICHT gesetzt"
-    exit 1
-  fi
-  touch /etc/provisioned
-  /etc/init.d/network restart 2>/dev/null || true
-  echo "OK – Provisioning abgeschlossen"
-else
-  echo "FAIL: Keine Config – provisioned NICHT gesetzt"
-  echo "     Dashboard: $SERVER/ui/ – Projekt zuweisen, dann erneut booten"
+CFG_SIZE=$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)
+log "CFG_RC=$CFG_RC CFG_HTTP_CODE=$CFG_HTTP_CODE CFG_SIZE=$CFG_SIZE"
+if [ "$CFG_RC" != "0" ]; then
+  log "FAIL: Config-Download fehlgeschlagen (RC=$CFG_RC)"; exit 1
+fi
+if [ "$HTTP_CLIENT" = "curl" ]; then
+  case "$CFG_HTTP_CODE" in
+    200) ;;
+    *)   log "FAIL: Config HTTP $CFG_HTTP_CODE – erwartet 200"
+         [ -s /tmp/provision.uci ] && log "RESP: $(head -c 200 /tmp/provision.uci)"
+         exit 1 ;;
+  esac
+fi
+if [ ! -s /tmp/provision.uci ]; then
+  log "FAIL: Config leer (CFG_SIZE=$CFG_SIZE) – Dashboard: $SERVER/ui/"; exit 1
+fi
+if grep -qiE '<html|"detail":|HTTP error' /tmp/provision.uci; then
+  log "FAIL: Config enthaelt HTTP-Fehlerseite – kein Apply"
+  log "CONTENT: $(head -c 300 /tmp/provision.uci)"
   exit 1
 fi
+if ! grep -qE '^(set |add_list |delete )' /tmp/provision.uci; then
+  log "FAIL: Config enthaelt keine UCI-Befehle (erwartet: set/add_list/delete)"
+  log "CONTENT: $(head -c 300 /tmp/provision.uci)"
+  exit 1
+fi
+log "Config OK – $CFG_SIZE Bytes, UCI-Muster vorhanden"
+
+# ─── Schritt 3: Apply + Verify ────────────────────────────────────────────────
+log "Apply..."
+uci batch < /tmp/provision.uci
+BATCH_RC=$?
+log "BATCH_RC=$BATCH_RC"
+if [ "$BATCH_RC" != "0" ]; then
+  log "FAIL: uci batch fehlgeschlagen – provisioned NICHT gesetzt"; exit 1
+fi
+uci commit
+COMMIT_RC=$?
+log "COMMIT_RC=$COMMIT_RC"
+if [ "$COMMIT_RC" != "0" ]; then
+  log "FAIL: uci commit fehlgeschlagen – provisioned NICHT gesetzt"; exit 1
+fi
+touch /etc/provisioned
+log "OK – /etc/provisioned gesetzt"
+NEWHOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null || echo "unbekannt")
+log "Hostname nach Apply: $NEWHOSTNAME"
+/etc/init.d/network restart 2>>"$LOG" || true
+log "=== Provisioning abgeschlossen ==="
 """
 
 

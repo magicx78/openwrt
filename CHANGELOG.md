@@ -5,6 +5,45 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.0] – 2026-03-01
+
+### Neu / Komplett überarbeitet
+
+Bootstrap-Script vollständig neu geschrieben. Alle Steps sind jetzt deterministisch,
+kein stilles Scheitern möglich.
+
+- **`/etc/provision.conf` sourcing**: Wenn `/etc/provision.conf` existiert, wird sie
+  mit `. /etc/provision.conf` eingelesen und überschreibt `SERVER`/`TOKEN`-Defaults.
+
+- **Logging mit Timestamps** (`/tmp/provision.log`): Alle Steps werden mit
+  `[HH:MM:SS] ...` nach stdout UND `/tmp/provision.log` geschrieben (`tee`).
+  Geloggt werden: HTTP_CLIENT, CLAIM_RC, CLAIM_HTTP_CODE, CFG_RC, CFG_HTTP_CODE,
+  CFG_SIZE, BATCH_RC, COMMIT_RC, Hostname nach Apply.
+
+- **curl bevorzugt** (statt wget): curl erlaubt HTTP-Status via `-w "%{http_code}"`.
+  Fallback: wget (nur wenn `--header` unterstützt). Sonst `exit 1`.
+
+- **HTTP-Status-Prüfung**:
+  - Claim: HTTP-Code muss `2xx` sein (curl) oder RC=0 (wget).
+  - Config: HTTP-Code muss `200` sein (curl) oder RC=0 (wget).
+  Bei Abweichung: Response-Anfang ins Log, `exit 1`.
+
+- **Config-Inhalt validiert** (NEU, verhindert Apply von Fehlerseiten):
+  1. Datei existiert und Größe > 0.
+  2. Kein HTML/Fehler-Inhalt: `grep -qiE '<html|"detail":|HTTP error'` → `exit 1`.
+  3. Mindestens ein UCI-Befehl: `grep -qE '^(set |add_list |delete )'` → sonst `exit 1`.
+
+- **Claim-Antwort-Check**: Nach RC=0 und HTTP-2xx zusätzlich `[ ! -s /tmp/claim.json ]`
+  → `exit 1` (fängt leere Responses ab).
+
+- **`uci get hostname` nach Apply**: Loggt den Hostnamen nach erfolgreichem `uci commit`
+  als Bestätigung dass die Config korrekt angewendet wurde.
+
+- **`/etc/init.d/network restart`** loggt nach `$LOG`, darf scheitern (`|| true`).
+  Alle anderen Steps sind hart (`exit 1`).
+
+---
+
 ## [0.4.9] – 2026-03-01
 
 ### Behoben
