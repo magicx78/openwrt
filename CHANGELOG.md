@@ -5,6 +5,26 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.4] – 2026-03-01
+
+### Behoben
+
+- **`_generate_provision_sh()` – wget-Claim sendet falsches Format**:
+  Das generierte `99-provision.sh` schickte Form-Data mit Feldname `mac=...` statt
+  JSON mit `base_mac`. Obwohl v0.4.3 den Server robust gemacht hat (beides akzeptiert),
+  war das Script selbst weiterhin semantisch falsch.
+
+  **Fix**: wget-Claim-Aufruf auf JSON umgestellt:
+  - `--header "Content-Type: application/json"` hinzugefügt
+  - Feldname `base_mac` (korrekt, passend zu `/api/claim`)
+  - `hostname` aus dem Body entfernt (war nie in ClaimReq/API verarbeitet)
+  - Erzeugt: `{"base_mac":"aa-bb-cc-dd-ee-ff","board_name":"...","model":"...","token":"..."}`
+
+  Der Server (v0.4.3) akzeptiert weiterhin beide Formate als Rückwärtskompatibilität
+  für bereits deployed Router mit dem alten Script.
+
+---
+
 ## [0.4.3] – 2026-03-01
 
 ### Behoben

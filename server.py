@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1303,10 +1303,11 @@ MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
 echo "Router: $HOSTNAME | MAC: $MAC | Board: $BOARD"
 echo "Server: $SERVER"
 
-# Schritt 1: Geraet beim Server registrieren (Claim)
+# Schritt 1: Geraet beim Server registrieren (Claim) – JSON mit base_mac
 echo "Registriere Geraet..."
 wget -q -O /tmp/claim.json \\
-  --post-data "mac=$MAC&hostname=$HOSTNAME&board_name=$BOARD&model=$MODEL&token=$TOKEN" \\
+  --header "Content-Type: application/json" \\
+  --post-data "{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}" \\
   "$SERVER/api/claim" 2>/dev/null && echo "OK Claim" || echo "WARN Claim fehlgeschlagen – weiter"
 
 # Schritt 2: UCI-Config laden
