@@ -5,6 +5,44 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.3] – 2026-03-01
+
+### Neu
+
+- **`SWITCH_BLOCK` in `build_vars()`**: Neue Template-Variable `{{SWITCH_BLOCK}}`
+  generiert UCI-Befehle für swconfig-basierte Switches (1x WAN-Trunk-Port + N LAN-Ports).
+  Aktivierung: `ENABLE_SWITCH=1` im Projekt. Konfigurierbar via `SWITCH_DEVICE`,
+  `SWITCH_CPU_PORT` (z.B. `6t`), `SWITCH_WAN_PORT` (z.B. `0`),
+  `SWITCH_LAN_PORTS` (z.B. `1 2 3 4`), `WAN_PROTO` (`dhcp`/`pppoe`).
+  Default: deaktiviert (wird im Template als Kommentar-Platzhalter eingefügt).
+  Sicher bei homogenem Router-Bestand (identische HW → identische Port-Nummern).
+
+- **Projekt-Settings: Switch-Sektion**: 6 neue Felder in der Projekt-Edit-UI
+  (`ENABLE_SWITCH`, `SWITCH_DEVICE`, `SWITCH_CPU_PORT`, `SWITCH_WAN_PORT`,
+  `SWITCH_LAN_PORTS`, `WAN_PROTO`) werden beim Speichern persistiert.
+
+### Behoben
+
+- **`_ssh_push_job`: `network restart` → SSH-Trennung kein Fehler mehr**:
+  Das Provisioning-Script führt `network restart` am Ende aus – das tötet die
+  SSH-Verbindung. Bisher wurde das als Job-Fehler gewertet (rc≠0), obwohl
+  `/etc/provisioned` bereits gesetzt war. Fix: Erkennung über Log-Marker
+  `"provisioned gesetzt"` / `"Provisioning abgeschlossen"` als Erfolg, auch bei
+  rc≠0. SSH-Timeout auf 90s erhöht (war 60s) um mehr Script-Zeit zu erlauben.
+
+- **Bootstrap-Script: Version dynamisch**: Versionsstring im generierten
+  `99-provision.sh` jetzt aus `__version__` statt hartkodiert `v0.5.1`.
+
+### Hinweis: Router-Connectivity nach Provisioning
+
+Nach `network restart` verliert der Router **kurzzeitig** die Verbindung
+(SSH-Session stirbt). Er kommt zurück, sobald die Interfaces wieder hochgefahren
+sind. Die Verwaltungs-IP bleibt erhalten, **sofern** das Template keine andere
+MGMT-IP setzt. Empfehlung: MGMT-IP via `{{MGMT_NET}}.{{MGMT_SUFFIX}}` statisch
+definieren, dann ist der Router nach ~5–15s wieder per SSH erreichbar.
+
+---
+
 ## [0.5.2] – 2026-03-01
 
 ### Behoben

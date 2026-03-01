@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -711,6 +711,34 @@ def build_vars(settings: dict, mac: str, hostname: str) -> dict:
             if net.get("gateway"):
                 net_lines.append(f"set network.{nname}.gateway='{net['gateway']}'")
     networks_block = "\n".join(net_lines) if net_lines else "# Keine statischen Interfaces konfiguriert"
+    # Switch-Config (swconfig-basiert; für homogene Router-Flotten mit identischer HW)
+    # Aktivierung: ENABLE_SWITCH=1 im Projekt, Ports hardware-spezifisch anpassen
+    if settings.get("ENABLE_SWITCH", "0") == "1":
+        sw_dev  = settings.get("SWITCH_DEVICE", "switch0")
+        sw_cpu  = settings.get("SWITCH_CPU_PORT", "6t")
+        sw_wan  = settings.get("SWITCH_WAN_PORT", "0")
+        sw_lan  = settings.get("SWITCH_LAN_PORTS", "1 2 3 4")
+        wan_proto = settings.get("WAN_PROTO", "dhcp")
+        switch_block = "\n".join([
+            f"# Switch: 1x WAN-Trunk (Port {sw_wan}) + LAN (Ports {sw_lan})",
+            f"set network.@switch[0]=switch",
+            f"set network.@switch[0].name='{sw_dev}'",
+            f"set network.@switch[0].reset='1'",
+            f"set network.@switch[0].enable_vlan='1'",
+            f"set network.@switch_vlan[0]=switch_vlan",
+            f"set network.@switch_vlan[0].device='{sw_dev}'",
+            f"set network.@switch_vlan[0].vlan='1'",
+            f"set network.@switch_vlan[0].ports='{sw_lan} {sw_cpu}'",
+            f"set network.@switch_vlan[1]=switch_vlan",
+            f"set network.@switch_vlan[1].device='{sw_dev}'",
+            f"set network.@switch_vlan[1].vlan='2'",
+            f"set network.@switch_vlan[1].ports='{sw_wan} {sw_cpu}'",
+            f"set network.wan=interface",
+            f"set network.wan.device='{sw_dev}.2'",
+            f"set network.wan.proto='{wan_proto}'",
+        ])
+    else:
+        switch_block = "# Switch deaktiviert (ENABLE_SWITCH=0 in Projekt-Settings)"
     return {**settings,
             "MGMT_SUFFIX":     str(suffix),
             "HOSTNAME":        hostname,
@@ -718,6 +746,7 @@ def build_vars(settings: dict, mac: str, hostname: str) -> dict:
             "MESH_BLOCK":      mesh,
             "WLAN_BLOCK":      wlan_block,
             "NETWORKS_BLOCK":  networks_block,
+            "SWITCH_BLOCK":    switch_block,
             **net_vars}
 
 def render_template(content: str, vars_: dict, role_override: str,
@@ -1294,7 +1323,7 @@ def _generate_provision_sh(server_url: str, token: str) -> str:
     """Generiert das 99-provision.sh Bootstrap-Script dynamisch.
     Wird von /download/99-provision.sh und /api/setup/quick-ssh genutzt."""
     return f"""#!/bin/sh
-# OpenWrt Provisioning Bootstrap v0.5.1 – auto-generiert
+# OpenWrt Provisioning Bootstrap v{__version__} – auto-generiert
 
 # ─── Konfiguration (Defaults; /etc/provision.conf ueberschreibt) ──────────────
 SERVER="{server_url}"
@@ -1304,7 +1333,7 @@ TOKEN='{token}'
 # ─── Logging (stdout + /tmp/provision.log) ────────────────────────────────────
 LOG=/tmp/provision.log
 log() {{ echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }}
-log "=== Provisioning Start v0.5.1 ==="
+log "=== Provisioning Start v{__version__} ==="
 log "SERVER=$SERVER"
 
 # ─── Idempotenz ───────────────────────────────────────────────────────────────
@@ -1645,22 +1674,33 @@ def _ssh_push_job(job_id: str, ip: str, user: str, password: str, script: str,
         logline(f"[{_ts()}] ✅ Script übertragen")
 
         # Schritt 3: /etc/provisioned löschen + Script ausführen
-        logline(f"[{_ts()}] Führe Provisioning aus...")
+        # WICHTIG: network restart am Ende des Scripts trennt die SSH-Verbindung (rc≠0 erwartet).
+        # Erfolg wird über Log-Marker "provisioned gesetzt" erkannt – NICHT über rc.
+        logline(f"[{_ts()}] Führe Provisioning aus (network restart trennt SSH – erwartet)...")
         rc, stdout, stderr = _ssh_exec(
             base_ssh,
-            "rm -f /etc/provisioned && sh /etc/uci-defaults/99-provision 2>&1 | head -50",
-            timeout=60)
+            "rm -f /etc/provisioned && sh /etc/uci-defaults/99-provision 2>&1 | head -60",
+            timeout=90)
         output = (stdout + stderr).strip()
         if output:
-            logline(f"Router-Output:\n{output[:500]}")
-        # Exitcode prüfen
+            logline(f"Router-Output:\n{output[:800]}")
+        # Erfolgs-Marker: touch /etc/provisioned ist VOR network restart → taucht im Log auf
+        _PROV_SUCCESS_MARKERS = (
+            "provisioned gesetzt", "/etc/provisioned", "Provisioning abgeschlossen",
+            "Bereits provisioned")
+        prov_ok = any(m in output for m in _PROV_SUCCESS_MARKERS)
         if rc != 0:
-            raise RuntimeError(f"Provisioning-Script fehlgeschlagen (Exit: {rc}): {(stderr or stdout)[:200]}")
-        # Fatal-Output-Erkennung: bekannte Fehlermeldungen auch bei Exit 0
-        for pattern in _DEPLOY_FATAL_PATTERNS:
-            if pattern in output:
-                raise RuntimeError(f"Provisioning fehlgeschlagen: '{pattern}' in Router-Output erkannt")
-        logline(f"[{_ts()}] ✅ Provisioning abgeschlossen (Exit: {rc})")
+            if prov_ok:
+                # network restart hat SSH-Verbindung getrennt – Provisioning war erfolgreich
+                logline(f"[{_ts()}] ✅ Provisioning OK (rc={rc} durch network restart → SSH-Trennung normal)")
+            else:
+                raise RuntimeError(f"Provisioning-Script fehlgeschlagen (Exit: {rc}): {(stderr or stdout)[:200]}")
+        else:
+            # Fatal-Output-Erkennung: bekannte Fehlermeldungen auch bei Exit 0
+            for pattern in _DEPLOY_FATAL_PATTERNS:
+                if pattern in output:
+                    raise RuntimeError(f"Provisioning fehlgeschlagen: '{pattern}' in Router-Output erkannt")
+            logline(f"[{_ts()}] ✅ Provisioning abgeschlossen (Exit: {rc})")
 
         # DB updaten
         conn = sqlite3.connect(db_path)
@@ -2692,6 +2732,13 @@ def ui_project_edit(name: str, db: sqlite3.Connection=Depends(get_db), _=Depends
         ("Mesh aktiv","ENABLE_MESH","1=aktiv, 0=aus"),
         ("Mesh SSID","MESH_ID","Name des Mesh-Netzes"),
         ("Mesh Passwort","MESH_PSK","Passwort fuer Mesh"),
+        ("Switch (WAN/LAN)",None,None),
+        ("Switch aktiv","ENABLE_SWITCH","1=UCI-Switch-Config pushen, 0=aus"),
+        ("Switch-Gerät","SWITCH_DEVICE","switch0 (hw-spezifisch prüfen)"),
+        ("CPU-Port","SWITCH_CPU_PORT","6t = CPU tagged (hw-spezifisch)"),
+        ("WAN-Port","SWITCH_WAN_PORT","0 = Port 0 als WAN-Trunk"),
+        ("LAN-Ports","SWITCH_LAN_PORTS","1 2 3 4 (Leerzeichen-getrennt)"),
+        ("WAN-Protokoll","WAN_PROTO","dhcp oder pppoe"),
         ("Template",None,None),
     ]
     rows = ""
@@ -2946,7 +2993,9 @@ async def ui_project_save(name: str, request: Request,
                            db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin)):
     form = await request.form()
     desc = str(form.get("description",""))
-    keys = ["MGMT_NET","GW","DNS","ENABLE_MESH","MESH_ID","MESH_PSK","template"]
+    keys = ["MGMT_NET","GW","DNS","ENABLE_MESH","MESH_ID","MESH_PSK",
+            "ENABLE_SWITCH","SWITCH_DEVICE","SWITCH_CPU_PORT",
+            "SWITCH_WAN_PORT","SWITCH_LAN_PORTS","WAN_PROTO","template"]
     s = {k: str(form.get(k,"")) for k in keys if form.get(k)}
     # WLANs dynamisch einlesen
     wlan_count = int(form.get("wlan_count","0") or 0)
