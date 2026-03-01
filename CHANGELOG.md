@@ -5,6 +5,29 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.9] – 2026-03-01
+
+### Behoben
+
+- **`curl -sS` statt `curl -X POST` ohne Flags**: `-sS` = `--silent --show-error`:
+  Unterdrückt den Progress-Bar, zeigt aber Verbindungs- und HTTP-Fehler.
+  `-X POST` entfernt (redundant, da `-d` implizit POST setzt).
+
+- **FAIL-Meldung erweitert**: `"...kein curl). Installiere curl oder erweitere den Server."`
+  Klare Handlungsanweisung für den Fall, dass kein JSON-POST möglich ist.
+
+- **Leere Claim-Antwort → `exit 1`** (neu): Nach dem CLAIM_RC-Check zusätzliche Prüfung:
+  ```sh
+  if [ ! -s /tmp/claim.json ]; then
+    echo "FAIL: Claim-Antwort leer – Server erreichbar aber keine Antwort?"
+    exit 1
+  fi
+  ```
+  Fängt den Fall ab, dass wget/curl RC=0 liefert aber die Antwortdatei leer ist
+  (z. B. bei Redirect oder leerem 200-Response).
+
+---
+
 ## [0.4.8] – 2026-03-01
 
 ### Behoben / Verbessert

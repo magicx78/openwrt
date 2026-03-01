@@ -1,4 +1,4 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.8
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.9
 
 > Stand: 2026-03-01 | Datei: server.py (~6200 Zeilen) | DB: provision.db (SQLite)
 
@@ -6,7 +6,7 @@
 
 ## Aktueller Status
 
-Der Server ist **stabil und produktionsbereit**. Version 0.4.8 wurde vollstaendig implementiert.
+Der Server ist **stabil und produktionsbereit**. Version 0.4.9 wurde vollstaendig implementiert.
 
 ### Was laeuft
 
@@ -42,6 +42,7 @@ Der Server ist **stabil und produktionsbereit**. Version 0.4.8 wurde vollstaendi
 | /api/config 409 + provision.conf Quotes | OK | NEU v0.4.6: 404→409, TOKEN='...' in provision.conf, cfg-wget ohne 2>/dev/null |
 | Bootstrap final stabilisiert | OK | NEU v0.4.7: BusyBox --header Check, BATCH_RC+COMMIT_RC, kein -q |
 | Bootstrap deterministisch | OK | NEU v0.4.8: curl-Fallback statt Form-Data, CLAIM_RC exit 1, HTTP_CLIENT einmalig |
+| Bootstrap final korrekt | OK | NEU v0.4.9: curl -sS, leere claim.json exit 1, FAIL-Meldung mit Handlungshinweis |
 
 ---
 

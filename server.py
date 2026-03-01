@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.8"
+__version__ = "0.4.9"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1307,7 +1307,7 @@ if wget --help 2>&1 | grep -q -- '--header'; then
 elif command -v curl >/dev/null 2>&1; then
   HTTP_CLIENT=curl
 else
-  echo "FAIL: Kein JSON-POST moeglich (wget ohne --header und kein curl)"
+  echo "FAIL: Kein JSON-POST moeglich (wget ohne --header und kein curl). Installiere curl oder erweitere den Server."
   exit 1
 fi
 echo "HTTP_CLIENT: $HTTP_CLIENT"
@@ -1321,10 +1321,9 @@ if [ "$HTTP_CLIENT" = "wget" ]; then
     --post-data "$CLAIM_JSON" \\
     "$SERVER/api/claim"
 else
-  curl -X POST \\
+  curl -sS -o /tmp/claim.json \\
     -H 'Content-Type: application/json' \\
     -d "$CLAIM_JSON" \\
-    -o /tmp/claim.json \\
     "$SERVER/api/claim"
 fi
 CLAIM_RC=$?
@@ -1332,6 +1331,10 @@ echo "CLAIM_RC:$CLAIM_RC"
 [ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
 if [ "$CLAIM_RC" != "0" ]; then
   echo "FAIL: Claim fehlgeschlagen (RC:$CLAIM_RC) – Provisioning abgebrochen"
+  exit 1
+fi
+if [ ! -s /tmp/claim.json ]; then
+  echo "FAIL: Claim-Antwort leer – Server erreichbar aber keine Antwort?"
   exit 1
 fi
 
