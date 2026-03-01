@@ -5,6 +5,26 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.6] – 2026-03-01
+
+### Neu
+
+- **`GET /ui/ssh-generator` – SSH-Key Generator & Auto-Installer**: Vollständiger Workflow:
+  1. **Generieren**: `POST /api/ssh/generate-keypair` → RSA 4096-bit Key
+  2. **Download**: `GET /api/ssh/private-key/download` → `openwrt-private.pem` für Client
+  3. **Install einzeln**: `POST /api/ssh/install-on-device` → Public-Key auf einem Router
+  4. **Install Alle**: `POST /api/ssh/install-all` → Public-Key auf ALLEN Routern (mit Passwort)
+
+- **SSH-Auto-Installer UI**: 3-Schritt-Workflow mit Log-Anzeige
+  - Keypair-Info (Typ, Bits, Fingerprint, Public-Key)
+  - Device-Dropdown für Einzel- oder Mehrfach-Installation
+  - Installation-Logs in Echtzeit
+
+- **Navigation Update**: `/ui/ssh-generator` (🔑 SSH-Generator) in Hauptnav hinzugefügt
+  - Zwischen Einstellungen und Setup
+
+---
+
 ## [0.5.5] – 2026-03-01
 
 ### Neu

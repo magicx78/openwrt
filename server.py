@@ -17,11 +17,11 @@ except ImportError:
     _HAS_PARAMIKO = False
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1869,6 +1869,7 @@ pre{{background:#161b22;padding:1em;border-radius:6px;overflow-x:auto;border:1px
   {_nav("/ui/roles","🎭","Rollen")}
   {_nav("/ui/settings","⚙️","Einstellungen")}
   <span class="sep">|</span>
+  {_nav("/ui/ssh-generator","🔑","SSH-Generator")}
   {_nav("/ui/setup","🚀","Setup")}
   {_nav("/ui/debug","🔧","Debug")}
 </nav>
@@ -3559,6 +3560,344 @@ async def api_ssh_key_install(request: Request, db: sqlite3.Connection=Depends(g
     except Exception as e:
         logline(f"[{_ts()}] ❌ Exception: {e}")
         return {"ok": False, "log": "\n".join(log_lines), "detail": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API: SSH-Key-Generator  –  generiert Keypair automatisch
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/ssh/generate-keypair")
+def api_ssh_generate_keypair(db: sqlite3.Connection = Depends(get_db),
+                             _=Depends(check_admin)):
+    """Generiert ein neues SSH-Keypair (RSA 4096) und speichert es in der DB."""
+    if not _HAS_PARAMIKO:
+        raise HTTPException(500, "paramiko nicht installiert – SSH-Generator nicht verfügbar")
+    try:
+        # RSA 4096 Key generieren
+        key = _paramiko.RSAKey.generate(4096)
+        import io as _io
+        priv_file = _io.StringIO()
+        key.write_private_key(priv_file)
+        private_key_pem = priv_file.getvalue()
+        # Public Key (OpenSSH Format)
+        pub_key_openssh = f"{key.get_name()} {key.get_base64()}"
+        # Fingerprint
+        fp_hex = key.get_fingerprint().hex()
+        # In DB speichern
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('SSH_PRIVKEY',?)",
+                   (private_key_pem,))
+        db.commit()
+        _log_activity("ssh", "-", "✅ SSH-Keypair generiert (RSA 4096)")
+        return {
+            "ok": True,
+            "type": "RSA",
+            "bits": 4096,
+            "fingerprint": fp_hex,
+            "public_key": pub_key_openssh,
+            "message": "Keypair generiert – Download Private-Key jetzt!"
+        }
+    except Exception as e:
+        _log_activity("ssh", "-", f"❌ Keypair-Generator Error: {str(e)[:50]}")
+        raise HTTPException(500, f"Keypair-Generierung fehlgeschlagen: {str(e)}")
+
+
+@app.get("/api/ssh/private-key/download")
+def api_ssh_private_key_download(db: sqlite3.Connection = Depends(get_db),
+                                 _=Depends(check_admin)):
+    """Lädt den Private-Key als .pem Datei herunter (für Client speichern)."""
+    row = db.execute("SELECT value FROM settings WHERE key='SSH_PRIVKEY'").fetchone()
+    private_key = (row[0] or "").strip() if row else ""
+    if not private_key:
+        raise HTTPException(404, "Kein SSH-Key in DB – generiere zuerst einen!")
+    return Response(
+        content=private_key,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=openwrt-private.pem"})
+
+
+def _ssh_install_key_on_host(device_ip: str, user: str, password: str,
+                               private_key_pem: str, device_mac: str = "-") -> dict:
+    """Hilfsfunktion: SSH-Key auf einem einzelnen Host installieren."""
+    log_lines = []
+    def logline(msg):
+        log_lines.append(msg)
+
+    if not _HAS_PARAMIKO:
+        return {"ok": False, "log": "\n".join(log_lines), "detail": "paramiko nicht installiert"}
+
+    # Public Key aus Private Key extrahieren
+    import io as _io
+    pub_key = None
+    for _kc in (_paramiko.RSAKey, _paramiko.Ed25519Key, _paramiko.ECDSAKey):
+        try:
+            pk = _kc.from_private_key(_io.StringIO(private_key_pem))
+            pub_key = f"{pk.get_name()} {pk.get_base64()}"
+            break
+        except Exception:
+            continue
+    if not pub_key:
+        return {"ok": False, "log": "\n".join(log_lines), "detail": "Public Key konnte nicht extrahiert werden"}
+
+    try:
+        logline(f"[{_ts()}] Installiere auf {device_ip} ({user})...")
+        base = _build_base_ssh(device_ip, user, password, logline)
+        rc, out, err = _ssh_exec(base, "echo SSH_OK", timeout=10)
+        if "SSH_OK" not in out:
+            logline(f"[{_ts()}] ❌ SSH-Verbindung fehlgeschlagen")
+            return {"ok": False, "log": "\n".join(log_lines), "device": device_ip}
+
+        logline(f"[{_ts()}] ✅ SSH-Verbindung OK")
+        safe_key = pub_key.replace("'", "'\\''")
+        cmd = f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{safe_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_OK"
+        rc2, out2, err2 = _ssh_exec(base, cmd, timeout=15)
+        if "KEY_OK" in out2:
+            logline(f"[{_ts()}] ✅ Public Key installiert")
+            _log_activity("ssh", device_mac, f"✅ SSH-Key auf {device_ip}")
+            return {"ok": True, "log": "\n".join(log_lines), "device": device_ip}
+        else:
+            logline(f"[{_ts()}] ❌ Installation fehlgeschlagen: {(err2 or out2)[:150]}")
+            return {"ok": False, "log": "\n".join(log_lines), "device": device_ip}
+    except Exception as e:
+        logline(f"[{_ts()}] ❌ Exception: {str(e)[:80]}")
+        return {"ok": False, "log": "\n".join(log_lines), "device": device_ip}
+
+
+@app.post("/api/ssh/install-on-device")
+async def api_ssh_install_on_device(request: Request,
+                                    db: sqlite3.Connection = Depends(get_db),
+                                    _=Depends(check_admin)):
+    """Installiert SSH-Key auf einem spezifischen Gerät (MAC oder IP)."""
+    body = await request.json()
+    target = body.get("target", "").strip()
+    password = body.get("password", "").strip()
+    user = body.get("user", "root").strip()
+
+    if not target:
+        return {"ok": False, "detail": "Target (MAC oder IP) fehlt"}
+
+    # Lookup Device
+    device_ip = target
+    device_mac = target
+    if len(target) > 12:  # IP-Format
+        if target.count(".") == 3:
+            device_ip = target
+        else:
+            return {"ok": False, "detail": f"Ungültiges IP-Format"}
+    else:  # MAC-Format
+        device_mac = target
+        d = db.execute("SELECT last_ip FROM devices WHERE base_mac=?", (target,)).fetchone()
+        if d and d["last_ip"]:
+            device_ip = d["last_ip"]
+        else:
+            return {"ok": False, "detail": f"Gerät {target}: keine IP bekannt"}
+
+    # Private Key laden
+    row = db.execute("SELECT value FROM settings WHERE key='SSH_PRIVKEY'").fetchone()
+    private_key = (row[0] or "").strip() if row else ""
+    if not private_key:
+        return {"ok": False, "detail": "Kein SSH-Key generiert"}
+
+    return _ssh_install_key_on_host(device_ip, user, password, private_key, device_mac)
+
+
+@app.post("/api/ssh/install-all")
+async def api_ssh_install_all(request: Request,
+                              db: sqlite3.Connection = Depends(get_db),
+                              _=Depends(check_admin)):
+    """Installiert SSH-Key auf ALLEN Devices mit bekannter last_ip."""
+    body = await request.json()
+    password = body.get("password", "").strip()
+    user = body.get("user", "root").strip()
+
+    if not password:
+        return {"ok": False, "detail": "Passwort erforderlich"}
+
+    # Private Key laden
+    row = db.execute("SELECT value FROM settings WHERE key='SSH_PRIVKEY'").fetchone()
+    private_key = (row[0] or "").strip() if row else ""
+    if not private_key:
+        return {"ok": False, "detail": "Kein SSH-Key generiert"}
+
+    # Alle Devices mit last_ip laden
+    devices = db.execute(
+        "SELECT base_mac, hostname, last_ip FROM devices WHERE last_ip IS NOT NULL AND last_ip != '' ORDER BY hostname"
+    ).fetchall()
+
+    results = []
+    for dev in devices:
+        mac = dev["base_mac"]
+        ip = dev["last_ip"]
+        hostname = dev["hostname"]
+        result = _ssh_install_key_on_host(ip, user, password, private_key, mac)
+        results.append({
+            "device": hostname,
+            "ip": ip,
+            "mac": mac,
+            "ok": result["ok"],
+            "log": result.get("log", "")
+        })
+
+    success_count = sum(1 for r in results if r["ok"])
+    _log_activity("ssh", "-", f"✅ SSH-Keys auf {success_count}/{len(results)} Routern installiert")
+
+    return {
+        "ok": True,
+        "total": len(devices),
+        "success": success_count,
+        "results": results
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: SSH-Key-Generator  –  automatisierte Keypair-Generierung + Installation
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/ui/ssh-generator", response_class=HTMLResponse)
+def ui_ssh_generator(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
+    """SSH-Keypair-Generator UI: Generieren → Download → Install."""
+    devices = db.execute(
+        "SELECT base_mac, hostname, last_ip FROM devices ORDER BY hostname"
+    ).fetchall()
+    device_opts = "".join(
+        f"<option value='{d['last_ip'] or d['base_mac']}'>"
+        f"  {d['hostname']} ({d['last_ip'] or d['base_mac']})"
+        f"</option>"
+        for d in devices if d['last_ip'] or d['base_mac']
+    )
+
+    content = r"""
+<h2>🔑 SSH-Key Generator & Auto-Installer</h2>
+
+<div class='card card-blue'>
+  <b>Workflow:</b> Generiere einen neuen SSH-Key → lade Private-Key herunter →
+  installiere Public-Key automatisch auf allen Routern → SSH ohne Passwort!
+</div>
+
+<!-- SCHRITT 1: GENERATE -->
+<div class='card'>
+<h3>① SSH-Keypair generieren</h3>
+<p class='muted'>Erstellt einen neuen RSA 4096-bit Key und speichert ihn.</p>
+<button class='btn btn-green' onclick='generateKeyPair()'>🔑 Keypair generieren</button>
+<div id='gen-result' style='margin-top:.5em;font-size:.9em'></div>
+</div>
+
+<!-- SCHRITT 2: DOWNLOAD -->
+<div class='card' id='step2-div' style='display:none'>
+<h3>② Private-Key herunterladen</h3>
+<p class='muted'>
+  Speichere den Private-Key auf deinem Computer:
+  <br><code>~/.ssh/openwrt</code> (Linux/Mac) oder <code>%USERPROFILE%\.ssh\openwrt.pem</code> (Windows)
+</p>
+<button class='btn btn-teal' onclick='downloadPrivateKey()'>⬇️ openwrt-private.pem herunterladen</button>
+<br><span class='muted' style='font-size:.85em;margin-top:.3em'>
+  Dann: <code>chmod 600 ~/.ssh/openwrt</code> (Linux/Mac) ausführen
+</span>
+</div>
+
+<!-- SCHRITT 3: INSTALL -->
+<div class='card' id='step3-div' style='display:none'>
+<h3>③ Public-Key auf Router installieren</h3>
+<p class='muted' style='margin-bottom:.5em'>Wähle Router aus und gib das SSH-Passwort ein (wird NICHT gespeichert):</p>
+<div style='display:grid;grid-template-columns:1fr 1fr;gap:.7em;margin-bottom:.5em'>
+  <div>
+    <label>🖥️ Router auswählen</label>
+    <select id='inst-device' style='width:100%;margin:.3em 0'>
+      <option value='ALL'>🔄 ALLE Router</option>
+      """ + device_opts + r"""
+    </select>
+  </div>
+  <div>
+    <label>🔒 SSH-Passwort (temp)</label>
+    <input type='password' id='inst-pass' placeholder='Wird nach Install nicht gespeichert' style='width:100%;margin:.3em 0'>
+  </div>
+</div>
+<button class='btn btn-orange' onclick='installPublicKey()'>📡 SSH-Key installieren</button>
+<div id='inst-result' style='margin-top:.5em;font-size:.85em;background:#1a1a1a;padding:.5em;border-radius:.3em;min-height:100px;max-height:300px;overflow-y:auto;display:none'>
+  <div class='muted'>Installationslogs werden hier angezeigt...</div>
+</div>
+</div>
+
+<script>
+async function generateKeyPair() {
+  const res = document.getElementById('gen-result');
+  res.textContent = '⏳ Generiere Keypair (RSA 4096)...';
+  try {
+    const r = await fetch('/api/ssh/generate-keypair', {method:'POST'});
+    if (!r.ok) { res.textContent = '❌ HTTP ' + r.status; return; }
+    const d = await r.json();
+    if (!d.ok) { res.textContent = '❌ ' + d.detail; return; }
+
+    res.innerHTML = `✅ <b>Keypair generiert!</b>
+      <br>Typ: ${d.type} ${d.bits}-bit
+      <br>Fingerprint: <code style='font-size:.85em'>${d.fingerprint}</code>
+      <br><br>💡 Public-Key:<br><code style='font-size:.8em;word-break:break-all'>${d.public_key}</code>`;
+
+    // Unlock Step 2 + 3
+    document.getElementById('step2-div').style.display = 'block';
+    document.getElementById('step3-div').style.display = 'block';
+  } catch(e) { res.textContent = '❌ ' + e; }
+}
+
+function downloadPrivateKey() {
+  window.location.href = '/api/ssh/private-key/download';
+}
+
+async function installPublicKey() {
+  const device = document.getElementById('inst-device').value;
+  const password = document.getElementById('inst-pass').value;
+  const res = document.getElementById('inst-result');
+
+  if (!password) { alert('SSH-Passwort eingeben'); return; }
+
+  res.style.display = 'block';
+
+  if (device === 'ALL') {
+    res.textContent = '⏳ Installiere SSH-Key auf ALLEN Routern...';
+    try {
+      const r = await fetch('/api/ssh/install-all', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({password, user: 'root'})
+      });
+      if (!r.ok) { res.textContent = '❌ HTTP ' + r.status; return; }
+      const d = await r.json();
+
+      let html = `<span class="ok">✅ Installation auf ${d.success}/${d.total} Routern erfolgreich</span><br><br>`;
+      for (const dev of d.results) {
+        const status = dev.ok ? '✅' : '❌';
+        html += `${status} <b>${dev.device}</b> (${dev.ip})<br>`;
+      }
+      html += '<br><b>Detaillierte Logs:</b><br>';
+      for (const dev of d.results) {
+        html += `<div style='margin-top:.5em;padding:.3em;background:#111'>
+          <b>${dev.device}</b>:<br><code style='font-size:.75em'>${dev.log.replace(/\n/g, '<br>')}</code>
+        </div>`;
+      }
+      res.innerHTML = html;
+    } catch(e) { res.textContent = '❌ ' + e; }
+  } else {
+    res.textContent = '⏳ Installiere SSH-Key...';
+    try {
+      const r = await fetch('/api/ssh/install-on-device', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({target: device, password, user: 'root'})
+      });
+      if (!r.ok) { res.textContent = '❌ HTTP ' + r.status; return; }
+      const d = await r.json();
+      if (d.ok) {
+        res.innerHTML = '<span class="ok">✅ SSH-Key erfolgreich installiert auf ' + d.device + '</span>'
+                      + '<br><br><b>Installation-Log:</b><br><code>' + d.log.replace(/\n/g, '<br>') + '</code>';
+      } else {
+        res.innerHTML = '<span class="warn">❌ ' + d.detail + '</span>'
+                      + '<br><br><b>Installation-Log:</b><br><code>' + d.log.replace(/\n/g, '<br>') + '</code>';
+      }
+    } catch(e) { res.textContent = '❌ ' + e; }
+  }
+}
+</script>"""
+    return _page(content, "SSH-Generator", "/ui/ssh-generator")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI: Setup-Assistent + Script-Generator

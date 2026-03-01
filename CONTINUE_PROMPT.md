@@ -1,6 +1,6 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.5
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.6
 
-> Stand: 2026-03-01 | Datei: server.py (~6400 Zeilen) | DB: provision.db (SQLite)
+> Stand: 2026-03-01 | Datei: server.py (~6600 Zeilen) | DB: provision.db (SQLite)
 
 ---
 
@@ -51,6 +51,7 @@ Der Server ist **stabil und produktionsbereit**. Version 0.5.0 wurde vollstaendi
 | Gerät vorregistrieren | OK | NEU v0.5.4: POST /api/devices/preregister, Formular in /ui/devices |
 | save-project Template-Fix | OK | NEU v0.5.4: "template":proj_name→"master" Bug behoben |
 | Debug & Monitoring Dashboard | OK | NEU v0.5.5: GET /ui/debug, Device-Stats, Activity-Log, Auto-Refresh (2s) |
+| SSH-Key Generator & Auto-Installer | OK | NEU v0.5.6: POST /api/ssh/generate-keypair, GET /api/ssh/private-key/download, POST /api/ssh/install-on-device + install-all |
 
 ---
 
