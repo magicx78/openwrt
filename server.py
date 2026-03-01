@@ -16,12 +16,12 @@ try:
 except ImportError:
     _HAS_PARAMIKO = False
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1915,6 +1915,38 @@ async def api_claim(request: Request, db: sqlite3.Connection = Depends(get_db)):
     return {"status": "claimed", "mac": mac,
             "hostname": hostname, "role": role, "project": project}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# API: Gerät vorregistrieren  –  legt Eintrag an bevor Bootstrap-Claim kommt
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/api/devices/preregister")
+async def api_device_preregister(request: Request,
+                                  db: sqlite3.Connection = Depends(get_db),
+                                  _=Depends(check_admin)):
+    body     = await request.json()
+    mac_raw  = str(body.get("mac", "")).strip()
+    hostname = str(body.get("hostname", "")).strip()
+    project  = str(body.get("project", "default")).strip()
+    role     = str(body.get("role", "node")).strip()
+    if not mac_raw:
+        raise HTTPException(400, "MAC fehlt")
+    mac = mac_raw.lower().strip().replace(":", "-")
+    if not hostname:
+        hostname = f"ap-{mac_suffix(mac):03d}"
+    now_ = now_utc().isoformat()
+    ex = db.execute("SELECT base_mac FROM devices WHERE base_mac=?", (mac,)).fetchone()
+    if ex:
+        db.execute("UPDATE devices SET hostname=?,project=?,role=? WHERE base_mac=?",
+                   (hostname, project, role, mac))
+    else:
+        db.execute(
+            "INSERT INTO devices(base_mac,hostname,role,board_name,model,last_seen,"
+            "claimed,project,status,last_ip) VALUES(?,?,?,?,?,?,0,?,?,?)",
+            (mac, hostname, role, "pre-registered", "pre-registered", now_,
+             project, "pending", None))
+    db.commit()
+    return {"ok": True, "mac": mac, "hostname": hostname, "project": project}
+
+
 # API: Status-Update vom Client
 @app.post("/api/status")
 def api_status(request: dict, db: sqlite3.Connection = Depends(get_db)):
@@ -2014,18 +2046,64 @@ def ui_dashboard(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/ui/devices", response_class=HTMLResponse)
 def ui_devices(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
-    devices = db.execute("SELECT * FROM devices ORDER BY last_seen DESC").fetchall()
-    rows = "".join(f"<tr><td>{d['base_mac']}</td><td>{d['hostname']}</td>"
+    devices  = db.execute("SELECT * FROM devices ORDER BY last_seen DESC").fetchall()
+    projects = db.execute("SELECT name FROM projects ORDER BY name").fetchall()
+    rows = "".join(f"<tr><td style='font-family:monospace'>{d['base_mac']}</td>"
+                   f"<td>{d['hostname']}</td>"
                    f"<td>{d['role']}</td><td>{d['project']}</td>"
                    f"<td>{_status_badge(d['status'] or 'pending')}</td>"
-                   f"<td><a href='/ui/devices/{d['base_mac']}'>✏️ Edit</a></td></tr>"
+                   f"<td><a class='btn' style='font-size:.8em;padding:.2em .6em' "
+                   f"href='/ui/devices/{d['base_mac']}'>✏️</a> "
+                   f"<a class='btn btn-green' style='font-size:.8em;padding:.2em .6em' "
+                   f"href='/ui/deploy/{d['base_mac']}'>🚀</a></td></tr>"
                    for d in devices)
+    proj_opts = "".join(f"<option value='{p['name']}'>{p['name']}</option>"
+                        for p in projects)
     content = f"""
 <h2>🖥️ Alle Geräte</h2>
 <table>
   <tr><th>MAC</th><th>Hostname</th><th>Rolle</th><th>Projekt</th><th>Status</th><th></th></tr>
-  {rows or "<tr><td colspan='6' class='muted'>Keine Geräte</td></tr>"}
-</table>"""
+  {rows or "<tr><td colspan='6' class='muted'>Keine Geräte registriert</td></tr>"}
+</table>
+<hr>
+<h3>➕ Gerät vorregistrieren</h3>
+<div class='card card-green'>
+  <p class='muted' style='margin:.2em 0 .7em'>
+    Legt ein Gerät <b>vor dem ersten Bootstrap-Claim</b> an – mit vorher bekannter MAC,
+    Wunsch-Hostname und Projekt. Wenn sich der Router dann meldet, übernimmt er diese Einstellungen.
+  </p>
+  <table style='width:100%;max-width:500px'>
+    <tr><td style='width:120px'>🔢 MAC-Adresse</td>
+        <td><input type='text' id='prereg-mac' placeholder='aa-bb-cc-dd-ee-ff' style='width:100%'></td></tr>
+    <tr><td>🏷️ Hostname</td>
+        <td><input type='text' id='prereg-host' placeholder='ap-001 (leer = auto)' style='width:100%'></td></tr>
+    <tr><td>📁 Projekt</td>
+        <td><select id='prereg-proj' style='width:100%'>{proj_opts}</select></td></tr>
+  </table>
+  <br>
+  <button class='btn btn-green' onclick='preReg()'>➕ Vorregistrieren</button>
+  <span id='prereg-result' style='margin-left:1em;font-size:.9em'></span>
+</div>
+<script>
+async function preReg() {{
+  const mac  = document.getElementById('prereg-mac').value.trim();
+  const host = document.getElementById('prereg-host').value.trim();
+  const proj = document.getElementById('prereg-proj').value;
+  const res  = document.getElementById('prereg-result');
+  if (!mac) {{ res.textContent = '❌ MAC fehlt'; return; }}
+  res.textContent = '⏳ ...';
+  try {{
+    const r = await fetch('/api/devices/preregister', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{mac, hostname: host, project: proj, role: 'node'}})
+    }});
+    if (!r.ok) {{ res.textContent = '❌ HTTP ' + r.status; return; }}
+    const d = await r.json();
+    res.innerHTML = '✅ ' + d.mac + ' → ' + d.hostname + ' (' + d.project + ')&nbsp;'
+                  + '<a href="" onclick="location.reload();return false">🔄 Seite neu laden</a>';
+  }} catch(e) {{ res.textContent = '❌ ' + e; }}
+}}
+</script>"""
     return _page(content, "Geräte", "/ui/devices")
 
 @app.get("/ui/devices/{mac}", response_class=HTMLResponse)
@@ -2608,6 +2686,36 @@ def ui_projects(db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin)):
 </div>
 {cards}
 <hr>
+<div style='display:flex;gap:.7em;align-items:center;flex-wrap:wrap;margin-bottom:.5em'>
+  <b>📦 Backup:</b>
+  <a class='btn btn-teal' href='/api/export/backup'>⬇️ Exportieren (JSON)</a>
+  <label class='btn' style='cursor:pointer'>⬆️ Importieren
+    <input type='file' id='imp-file-proj' accept='.json' style='display:none' onchange='importBackupProj()'>
+  </label>
+  <span id='imp-res-proj' style='font-size:.9em'></span>
+</div>
+<script>
+async function importBackupProj() {{
+  const file = document.getElementById('imp-file-proj').files[0];
+  if (!file) return;
+  const res = document.getElementById('imp-res-proj');
+  res.textContent = '⏳ Importiere...';
+  try {{
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const r = await fetch('/api/import/backup', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify(data)
+    }});
+    if (!r.ok) {{ res.textContent = '❌ HTTP ' + r.status; return; }}
+    const d = await r.json();
+    res.textContent = '✅ ' + d.templates_imported + ' Templates + '
+                    + d.projects_imported + ' Projekte importiert';
+    setTimeout(() => location.reload(), 1500);
+  }} catch(e) {{ res.textContent = '❌ ' + e; }}
+}}
+</script>
+<hr>
 <h3>➕ Neues Projekt anlegen</h3>
 <div class='card card-green'>
 <form method="POST" action="/ui/projects/new">
@@ -3068,11 +3176,41 @@ def ui_templates(db: sqlite3.Connection=Depends(get_db), _=Depends(check_admin))
   {rows}
 </table>
 <hr>
+<div style='display:flex;gap:.7em;align-items:center;flex-wrap:wrap;margin-bottom:.5em'>
+  <b>📦 Backup:</b>
+  <a class='btn btn-teal' href='/api/export/backup'>⬇️ Exportieren (JSON)</a>
+  <label class='btn' style='cursor:pointer'>⬆️ Importieren
+    <input type='file' id='imp-file' accept='.json' style='display:none' onchange='importBackup()'>
+  </label>
+  <span id='imp-res' style='font-size:.9em'></span>
+</div>
+<hr>
 <h3>➕ Neues Template</h3>
 <form method="POST" action="/ui/templates/new" style='display:flex;gap:.5em'>
   <input type='text' name='name' placeholder='template-name' style='width:200px'>
   <input type='submit' value='➕ Anlegen'>
-</form>"""
+</form>
+<script>
+async function importBackup() {{
+  const file = document.getElementById('imp-file').files[0];
+  if (!file) return;
+  const res = document.getElementById('imp-res');
+  res.textContent = '⏳ Importiere...';
+  try {{
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const r = await fetch('/api/import/backup', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify(data)
+    }});
+    if (!r.ok) {{ res.textContent = '❌ HTTP ' + r.status; return; }}
+    const d = await r.json();
+    res.textContent = '✅ ' + d.templates_imported + ' Templates + '
+                    + d.projects_imported + ' Projekte importiert';
+    setTimeout(() => location.reload(), 1500);
+  }} catch(e) {{ res.textContent = '❌ ' + e; }}
+}}
+</script>"""
     return _page(content, "Templates", "/ui/templates")
 
 @app.post("/ui/templates/new", response_class=HTMLResponse)
@@ -4271,7 +4409,7 @@ async def api_save_as_project(pull_id: str, request: Request,
         "WPA_PSK":     primary.get("key", ""),
         "ENABLE_11R":  primary.get("ieee80211r", "0"),
         "ENABLE_MESH": "0",
-        "template":    proj_name,
+        "template":    body.get("template", "master"),   # FIX v0.5.4: war proj_name (falsch)
         "wlans":       wlans,
         "pulled_from": cfg.get("ip", ""),
     }
@@ -4314,6 +4452,69 @@ async def api_save_as_template(pull_id: str, request: Request,
                    (tpl_name, content, now_))
     db.commit()
     return {"ok": True, "template": tpl_name, "lines": content.count("\n") + 1}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API: Backup Export / Import  (Templates + Projekte)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/export/backup")
+def api_export_backup(db: sqlite3.Connection = Depends(get_db),
+                      _=Depends(check_admin)):
+    """Exportiert alle Templates + Projekte als JSON-Datei."""
+    templates = db.execute("SELECT name, content FROM templates ORDER BY name").fetchall()
+    projects  = db.execute("SELECT name, description, settings FROM projects ORDER BY name").fetchall()
+    data = {
+        "version":     __version__,
+        "exported_at": now_utc().isoformat(),
+        "templates":   [{"name": t["name"], "content": t["content"] or ""} for t in templates],
+        "projects":    [{"name": p["name"], "description": p["description"] or "",
+                         "settings": json.loads(p["settings"] or "{}")} for p in projects],
+    }
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": "attachment; filename=openwrt-backup.json"})
+
+
+@app.post("/api/import/backup")
+async def api_import_backup(request: Request,
+                             db: sqlite3.Connection = Depends(get_db),
+                             _=Depends(check_admin)):
+    """Importiert Templates + Projekte aus einer JSON-Backup-Datei (merge/overwrite)."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, "Ungültiges JSON")
+    templates = data.get("templates", [])
+    projects  = data.get("projects", [])
+    now_      = now_utc().isoformat()
+    imported_t = 0
+    imported_p = 0
+    for t in templates:
+        name    = str(t.get("name", "")).strip()
+        content = str(t.get("content", ""))
+        if not name:
+            continue
+        db.execute("INSERT OR REPLACE INTO templates(name,content,updated_at) VALUES(?,?,?)",
+                   (name, content, now_))
+        imported_t += 1
+    for p in projects:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            continue
+        desc     = str(p.get("description", ""))
+        settings = json.dumps(p.get("settings", {}))
+        ex = db.execute("SELECT name FROM projects WHERE name=?", (name,)).fetchone()
+        if ex:
+            db.execute("UPDATE projects SET description=?,settings=? WHERE name=?",
+                       (desc, settings, name))
+        else:
+            db.execute(
+                "INSERT INTO projects(name,description,created_at,settings) VALUES(?,?,?,?)",
+                (name, desc, now_, settings))
+        imported_p += 1
+    db.commit()
+    return {"ok": True, "templates_imported": imported_t, "projects_imported": imported_p}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

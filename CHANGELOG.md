@@ -5,6 +5,35 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.4] – 2026-03-01
+
+### Neu
+
+- **`GET /api/export/backup`**: Exportiert alle Templates + Projekte als JSON-Datei
+  (`openwrt-backup.json`). Buttons in `/ui/templates` und `/ui/projects`.
+
+- **`POST /api/import/backup`**: Importiert Templates + Projekte aus einer
+  JSON-Backup-Datei (merge/overwrite). Bestehende Einträge werden überschrieben,
+  neue angelegt. Buttons mit Datei-Upload-Dialog in `/ui/templates` und `/ui/projects`.
+
+- **`POST /api/devices/preregister`**: Gerät vorab mit MAC + Hostname + Projekt + Rolle
+  anlegen, bevor der Bootstrap-Claim eintrifft. Wenn sich der Router später über
+  `/api/claim` meldet, übernimmt er Hostname/Projekt/Rolle aus dem vorregistrierten
+  Eintrag. UI: Formular unten auf `/ui/devices`.
+
+- **`/ui/devices` – Vorregistrierungs-Formular**: Neues Formular zum direkten
+  Anlegen von Geräten vor dem Bootstrap. Zeigt Projekt-Dropdown aus der DB.
+
+### Behoben
+
+- **`save-project` BUG: falscher Template-Name**: Der Endpunkt
+  `POST /api/config-pull/{pull_id}/save-project` speicherte `"template": proj_name`
+  (Projektname als Template-Name) statt `"template": "master"`. Folge: Der generierte
+  Config für dieses Projekt enthielt keine UCI-Befehle ("Config enthält keine
+  UCI-Befehle"). Fix: verwendet jetzt `body.get("template", "master")`.
+
+---
+
 ## [0.5.3] – 2026-03-01
 
 ### Neu

@@ -1,6 +1,6 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.3
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.4
 
-> Stand: 2026-03-01 | Datei: server.py (~6200 Zeilen) | DB: provision.db (SQLite)
+> Stand: 2026-03-01 | Datei: server.py (~6300 Zeilen) | DB: provision.db (SQLite)
 
 ---
 
@@ -47,6 +47,9 @@ Der Server ist **stabil und produktionsbereit**. Version 0.5.0 wurde vollstaendi
 | Bootstrap v0.5.1 fail-fast | OK | NEU v0.5.1: json_escape(), wget-Claim Body-Check, curl -fsS Config, CFG_SIZE<10 exit 1 |
 | Router-Push 500-Fix | OK | NEU v0.5.2: uci_cmds Array→String, globaler Exception-Handler, JS r.ok-Check |
 | Switch-Config + network restart | OK | NEU v0.5.3: SWITCH_BLOCK in build_vars, Projekt-Switch-Felder, network restart kein Fehler mehr, Bootstrap-Version dynamisch |
+| Export/Import Backup | OK | NEU v0.5.4: GET /api/export/backup + POST /api/import/backup (JSON), Buttons in Templates+Projekte-UI |
+| Gerät vorregistrieren | OK | NEU v0.5.4: POST /api/devices/preregister, Formular in /ui/devices |
+| save-project Template-Fix | OK | NEU v0.5.4: "template":proj_name→"master" Bug behoben |
 
 ---
 
