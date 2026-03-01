@@ -5,6 +5,28 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.5] – 2026-03-01
+
+### Neu
+
+- **`GET /ui/debug` – Live Debug & Monitoring Dashboard**: Echtzeitansicht aller Systeme:
+  - 📊 **Device-Stats**: provisioned/pending/error-Geräte, Projekt-Anzahl (aus DB)
+  - ⚙️ **Laufende Jobs**: SSH-Deploy, Push-Jobs mit Status, Progress, Fehlermeldungen
+  - 📊 **Activity-Log**: Letzte 20 Provisioning-Events (Claim, Push, Errors) mit Timestamps
+  - ⏰ **Auto-Refresh**: JavaScript-Update alle 2 Sekunden (kein Browser-Reload nötig)
+
+- **`GET /api/debug/status`**: JSON-API für Debug-Dashboard
+  - Liefert `jobs`, `activity`, `device_stats`, `projects_total`
+
+- **Activity-Logging**: `_log_activity(typ, mac, msg)` globale Funktion
+  - Automatisch geloggt: Claim-Events, Server-Errors (aus Global-Exception-Handler)
+  - Max 100 Einträge im RAM, FIFO-Overflow
+
+- **Navigation Update**: `/ui/debug` (🔧 Debug) in der Haupt-Navigation hinzugefügt
+  - Zwischen Setup und Ende
+
+---
+
 ## [0.5.4] – 2026-03-01
 
 ### Neu

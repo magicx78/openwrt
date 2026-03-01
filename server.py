@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -53,6 +53,20 @@ class DiagnoseReport(BaseModel):
 
 
 _diag_reports: Dict[str, Dict[str, Any]] = {}  # report_id -> {report, config}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug / Monitoring – Live-Job-Status und Activity-Log
+# ─────────────────────────────────────────────────────────────────────────────
+_debug_jobs = {}  # {jid: {mac, status, progress, ip, error, started, updated}}
+_debug_activity = []  # [{ts, type, mac, msg}, ...] – max 100 Einträge
+
+def _log_activity(typ: str, mac: str = "-", msg: str = "") -> None:
+    """Logt ein Activity-Event (Claim, Push, Error)."""
+    global _debug_activity
+    event = {"ts": now_utc().isoformat(), "type": typ, "mac": mac, "msg": msg}
+    _debug_activity.insert(0, event)
+    if len(_debug_activity) > 100:
+        _debug_activity.pop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Datetime-Helpers: intern immer UTC timezone-aware
@@ -1270,6 +1284,8 @@ app = FastAPI(title="OpenWrt Provisioning Server", lifespan=lifespan)
 async def _global_exception_handler(request: Request, exc: Exception):
     """Fängt alle unbehandelten Exceptions ab und gibt JSON zurück.
     Verhindert 'Unexpected token I – Internal Server Error' im Client."""
+    error_msg = str(exc)[:100]
+    _log_activity("error", "-", f"❌ {exc.__class__.__name__}: {error_msg}")
     return JSONResponse(
         status_code=500,
         content={"error": "internal_server_error", "detail": str(exc)})
@@ -1854,6 +1870,7 @@ pre{{background:#161b22;padding:1em;border-radius:6px;overflow-x:auto;border:1px
   {_nav("/ui/settings","⚙️","Einstellungen")}
   <span class="sep">|</span>
   {_nav("/ui/setup","🚀","Setup")}
+  {_nav("/ui/debug","🔧","Debug")}
 </nav>
 {content}
 </body></html>""")
@@ -1911,6 +1928,7 @@ async def api_claim(request: Request, db: sqlite3.Connection = Depends(get_db)):
         db.execute("INSERT INTO devices(base_mac,hostname,role,board_name,model,last_seen,claimed,project,status,last_ip) VALUES(?,?,?,?,?,?,1,?,?,?)",
                    (mac, hostname, role, board_name, model, now, project, "provisioned", client_ip))
     db.commit()
+    _log_activity("claim", mac, f"✅ Gerät geclaimt → {hostname} (Projekt: {project})")
 
     return {"status": "claimed", "mac": mac,
             "hostname": hostname, "role": role, "project": project}
@@ -6704,3 +6722,142 @@ async function doPush() {
 }
 </script>"""
     return _page(content, "Config-Push", "/ui/config-push")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API: Debug / Monitoring  –  Live-Status von Jobs + Activity-Log
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/debug/status")
+def api_debug_status(db: sqlite3.Connection = Depends(get_db),
+                     _=Depends(check_admin)):
+    """Liefert Live-Status: laufende Jobs + Activity-Log."""
+    # Top devices by status
+    devices = db.execute(
+        "SELECT status, COUNT(*) as cnt FROM devices GROUP BY status"
+    ).fetchall()
+    device_stats = {row["status"]: row["cnt"] for row in devices}
+
+    # Projects count
+    projects_count = db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+
+    return {
+        "timestamp": now_utc().isoformat(),
+        "jobs": _debug_jobs.copy(),
+        "activity": _debug_activity[:20],  # Letzte 20
+        "device_stats": device_stats,
+        "projects_total": projects_count,
+    }
+
+
+@app.get("/ui/debug", response_class=HTMLResponse)
+def ui_debug(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
+    """Live Debug Dashboard: Jobs + Activity-Log mit Auto-Refresh."""
+    content = r"""
+<h2>🔧 Debug & Monitoring</h2>
+
+<div class='card card-blue'>
+  <b>ℹ️ Live-Status:</b> Auto-Update alle 2 Sekunden.
+  Shows what is happening on the server right now (running jobs, errors, provisioning activity).
+</div>
+
+<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:.7em;margin:.7em 0'>
+  <div class='card'>
+    <div style='color:#14a085;font-size:2em;font-weight:bold' id='stat-provisioned'>-</div>
+    <div class='muted'>Bereitgestellt</div>
+  </div>
+  <div class='card'>
+    <div style='color:#f97316;font-size:2em;font-weight:bold' id='stat-pending'>-</div>
+    <div class='muted'>Ausstehend</div>
+  </div>
+  <div class='card'>
+    <div style='color:#dc2626;font-size:2em;font-weight:bold' id='stat-error'>-</div>
+    <div class='muted'>Fehler</div>
+  </div>
+  <div class='card'>
+    <div style='color:#6366f1;font-size:2em;font-weight:bold' id='stat-projects'>-</div>
+    <div class='muted'>Projekte</div>
+  </div>
+</div>
+
+<h3>⚙️ Laufende Jobs</h3>
+<div id='jobs-container' class='card' style='background:#1a1a1a;padding:1em;font-family:monospace;font-size:.85em;min-height:150px;max-height:400px;overflow-y:auto'>
+  <div class='muted'>Keine Jobs läuft gerade...</div>
+</div>
+
+<h3>📊 Activity-Log</h3>
+<div id='activity-container' class='card' style='background:#1a1a1a;padding:1em;font-family:monospace;font-size:.82em;min-height:200px;max-height:500px;overflow-y:auto'>
+  <div class='muted'>Keine Aktivität...</div>
+</div>
+
+<script>
+let autoRefresh = true;
+
+function formatTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString('de-DE');
+}
+
+async function updateStatus() {
+  try {
+    const r = await fetch('/api/debug/status');
+    if (!r.ok) return;
+    const data = await r.json();
+
+    // Stats aktualisieren
+    document.getElementById('stat-provisioned').textContent = data.device_stats.provisioned || 0;
+    document.getElementById('stat-pending').textContent = data.device_stats.pending || 0;
+    document.getElementById('stat-error').textContent = (data.device_stats.error || 0) + (data.device_stats.FAILED || 0);
+    document.getElementById('stat-projects').textContent = data.projects_total || 0;
+
+    // Jobs
+    const jobsDiv = document.getElementById('jobs-container');
+    const jobs = data.jobs;
+    if (Object.keys(jobs).length === 0) {
+      jobsDiv.innerHTML = '<div class="muted">✅ Keine Jobs läuft gerade</div>';
+    } else {
+      let html = '';
+      for (const [jid, job] of Object.entries(jobs)) {
+        const status = job.status || 'unknown';
+        const statusColor = status === 'running' ? '#fbbf24' : status === 'success' ? '#10b981' : status === 'error' ? '#ef4444' : '#6b7280';
+        const icon = status === 'running' ? '⏳' : status === 'success' ? '✅' : status === 'error' ? '❌' : '❓';
+        const elapsed = job.updated ? `(${Math.floor((new Date() - new Date(job.updated)) / 1000)}s)` : '';
+        html += `<div style='margin:.5em 0;color:${statusColor}'>
+          ${icon} <b>${job.mac || 'unknown'}</b> – ${status} ${elapsed}<br>
+          <span class="muted" style='font-size:.9em'>&nbsp;&nbsp;IP: ${job.ip || '-'} | ${job.msg || job.error || '-'}</span>
+        </div>`;
+      }
+      jobsDiv.innerHTML = html;
+    }
+
+    // Activity
+    const actDiv = document.getElementById('activity-container');
+    const activity = data.activity || [];
+    if (activity.length === 0) {
+      actDiv.innerHTML = '<div class="muted">Warte auf Aktivität...</div>';
+    } else {
+      let html = '';
+      for (const evt of activity) {
+        let icon = '📝';
+        let color = '#9ca3af';
+        if (evt.type === 'claim') { icon = '📥'; color = '#3b82f6'; }
+        else if (evt.type === 'push') { icon = '📤'; color = '#10b981'; }
+        else if (evt.type === 'error') { icon = '❌'; color = '#ef4444'; }
+        else if (evt.type === 'success') { icon = '✅'; color = '#10b981'; }
+        html += `<div style='margin:.4em 0;color:${color}'>
+          ${icon} <span class="muted">[${formatTime(evt.ts)}]</span>
+          <b>${evt.mac}</b>: ${evt.msg}
+        </div>`;
+      }
+      actDiv.innerHTML = html;
+    }
+  } catch(e) {
+    console.error('Debug update failed:', e);
+  }
+}
+
+// Initial load + periodic refresh
+updateStatus();
+setInterval(updateStatus, 2000);
+</script>"""
+    return _page(content, "Debug", "/ui/debug")
