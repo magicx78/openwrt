@@ -1733,10 +1733,10 @@ async def api_claim(request: Request, db: sqlite3.Connection = Depends(get_db)):
     if not mac:
         raise HTTPException(400, "MAC fehlt")
     if not secrets.compare_digest(token, ENROLLMENT_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(403, "Invalid token")
 
-    # MAC normalisieren: "aa:bb:cc:dd:ee:ff" → "aa-bb-cc-dd-ee-ff"
-    mac = mac.lower().replace(":", "-")
+    # MAC normalisieren: lower() + strip() + "aa:bb:cc" → "aa-bb-cc"
+    mac = mac.lower().strip().replace(":", "-")
 
     now       = now_utc().isoformat()
     client_ip = request.client.host if request.client else None
