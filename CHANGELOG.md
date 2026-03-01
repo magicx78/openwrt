@@ -5,6 +5,31 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.2] – 2026-03-01
+
+### Behoben
+
+- **Root-Cause: `uci_cmds` als Array statt String** (Hauptbug):
+  `doPush()` im Config-Push-UI sendete `uci_cmds` als JavaScript-Array
+  (`script.split('\n').filter(...)`). Python erhielt eine Liste und warf
+  `AttributeError: 'list' object has no attribute 'strip'` → HTTP 500 →
+  plaintext `"Internal Server Error"` → Client-JS versuchte `JSON.parse` →
+  `"Unexpected token 'I'"`.
+  **Fix server-seitig**: `api_direct_push` und `api_batch_push` (beide Kopien)
+  normalisieren `uci_cmds` jetzt: Liste → `"\n".join(...)`, String → `.strip()`.
+  **Fix client-seitig**: `doPush()` joiniert das Array vor dem Senden zu einem
+  String (`.join('\n')`); zusätzlich prüft der Client `r.ok` vor `.json()` und
+  zeigt bei HTTP-Fehler den Rohtext an.
+
+- **Globaler Exception-Handler**:
+  `@app.exception_handler(Exception)` nach `app = FastAPI(...)` eingefügt.
+  Alle unbehandelten Server-Exceptions geben jetzt immer
+  `{"error": "internal_server_error", "detail": "..."}` als JSON zurück –
+  niemals mehr HTML oder Plaintext. Verhindert zukünftige JSON-Parse-Fehler
+  auf der Client-Seite bei unerwarteten Server-Exceptions.
+
+---
+
 ## [0.5.1] – 2026-03-01
 
 ### Behoben / Gehärtet

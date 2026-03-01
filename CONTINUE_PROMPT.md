@@ -1,4 +1,4 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.1
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.5.2
 
 > Stand: 2026-03-01 | Datei: server.py (~6200 Zeilen) | DB: provision.db (SQLite)
 
@@ -45,6 +45,7 @@ Der Server ist **stabil und produktionsbereit**. Version 0.5.0 wurde vollstaendi
 | Bootstrap final korrekt | OK | NEU v0.4.9: curl -sS, leere claim.json exit 1, FAIL-Meldung mit Handlungshinweis |
 | Bootstrap v0.5.0 deterministisch | OK | NEU v0.5.0: Logging+Timestamps, HTTP-Status, Fehlerseiten-Check, UCI-Pattern-Check, provision.conf |
 | Bootstrap v0.5.1 fail-fast | OK | NEU v0.5.1: json_escape(), wget-Claim Body-Check, curl -fsS Config, CFG_SIZE<10 exit 1 |
+| Router-Push 500-Fix | OK | NEU v0.5.2: uci_cmds Array→String, globaler Exception-Handler, JS r.ok-Check |
 
 ---
 

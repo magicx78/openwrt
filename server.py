@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1232,6 +1232,18 @@ async def lifespan(app: FastAPI):
     init_db(); yield
 
 app = FastAPI(title="OpenWrt Provisioning Server", lifespan=lifespan)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Globaler Exception-Handler: immer JSON, nie HTML oder Plaintext
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Fängt alle unbehandelten Exceptions ab und gibt JSON zurück.
+    Verhindert 'Unexpected token I – Internal Server Error' im Client."""
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_server_error", "detail": str(exc)})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SSH-Push: Hintergrund-Jobs (subprocess+sshpass, paramiko oder SSH-Key-Auth)
@@ -4127,7 +4139,9 @@ async def api_direct_push(request: Request, _=Depends(check_admin)):
     ip        = body.get("ip", "").strip()
     user      = body.get("user", "root").strip()
     password  = body.get("password", "")
-    uci_cmds  = body.get("uci_cmds", "").strip()
+    # FIX v0.5.2: Akzeptiert String (multiline) UND Array (JS split().filter() → Liste)
+    _uci_raw  = body.get("uci_cmds", "")
+    uci_cmds  = "\n".join(str(c) for c in _uci_raw) if isinstance(_uci_raw, list) else str(_uci_raw).strip()
     do_commit = bool(body.get("do_commit", True))
     do_reload = bool(body.get("do_reload", True))
     do_reboot = bool(body.get("do_reboot", False))
@@ -4153,7 +4167,9 @@ async def api_batch_push(request: Request, _=Depends(check_admin)):
     """Batch-Push: gleiche UCI-Befehle auf mehrere Router parallel."""
     body      = await request.json()
     targets   = body.get("targets", [])
-    uci_cmds  = body.get("uci_cmds", "").strip()
+    # FIX v0.5.2: Akzeptiert String (multiline) UND Array
+    _uci_raw  = body.get("uci_cmds", "")
+    uci_cmds  = "\n".join(str(c) for c in _uci_raw) if isinstance(_uci_raw, list) else str(_uci_raw).strip()
     do_commit = bool(body.get("do_commit", True))
     do_reload = bool(body.get("do_reload", True))
     do_reboot = bool(body.get("do_reboot", False))
@@ -5381,7 +5397,9 @@ async def api_direct_push(request: Request, _=Depends(check_admin)):
     ip         = body.get("ip", "").strip()
     user       = body.get("user", "root").strip()
     password   = body.get("password", "")
-    uci_cmds   = body.get("uci_cmds", "").strip()
+    # FIX v0.5.2: Akzeptiert String (multiline) UND Array (JS split().filter() → Liste)
+    _uci_raw   = body.get("uci_cmds", "")
+    uci_cmds   = "\n".join(str(c) for c in _uci_raw) if isinstance(_uci_raw, list) else str(_uci_raw).strip()
     do_commit  = bool(body.get("do_commit", True))
     do_reload  = bool(body.get("do_reload", True))
     do_reboot  = bool(body.get("do_reboot", False))
@@ -5413,7 +5431,9 @@ async def api_batch_push(request: Request, _=Depends(check_admin)):
     """Gleiche UCI-Befehle parallel auf mehrere Ziel-Router anwenden."""
     body      = await request.json()
     targets   = body.get("targets", [])
-    uci_cmds  = body.get("uci_cmds", "").strip()
+    # FIX v0.5.2: Akzeptiert String (multiline) UND Array
+    _uci_raw  = body.get("uci_cmds", "")
+    uci_cmds  = "\n".join(str(c) for c in _uci_raw) if isinstance(_uci_raw, list) else str(_uci_raw).strip()
     do_commit = bool(body.get("do_commit", True))
     do_reload = bool(body.get("do_reload", True))
     do_reboot = bool(body.get("do_reboot", False))
@@ -6395,7 +6415,8 @@ async function doPush() {
   const do_reload = document.getElementById('cp-reload').checked;
   const do_reboot = document.getElementById('cp-reboot').checked;
   if (!ip) { alert('Router-IP fehlt'); return; }
-  const uci_cmds = script.split('\n').map(l=>l.trim()).filter(l=>l && !l.startsWith('#'));
+  // FIX v0.5.2: als String joinen, nicht als Array senden (verhindert AttributeError server-seitig)
+  const uci_cmds = script.split('\n').map(l=>l.trim()).filter(l=>l && !l.startsWith('#')).join('\n');
   const wrap = document.getElementById('push-wrap');
   const log  = document.getElementById('push-log');
   wrap.style.display = 'block';
@@ -6405,6 +6426,8 @@ async function doPush() {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ip, user, password, uci_cmds, do_commit, do_reload, do_reboot})
     });
+    // FIX v0.5.2: r.ok prüfen bevor .json() – verhindert "Unexpected token I" bei 500
+    if (!r.ok) { log.textContent = `❌ HTTP ${r.status}: ${await r.text()}`; return; }
     const d = await r.json();
     const job_id = d.job_id;
     if (!job_id) { log.textContent = '❌ ' + (d.detail||JSON.stringify(d)); return; }
