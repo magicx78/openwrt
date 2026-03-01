@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.5"
+__version__ = "0.4.6"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1308,7 +1308,7 @@ echo "CLAIM_RC:$?"
 [ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
 
 echo "Config..."
-wget -q -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN" 2>/dev/null
+wget -q -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
 echo "CFG_RC:$? SIZE:$(wc -c </tmp/provision.uci 2>/dev/null || echo 0)"
 
 if [ -s /tmp/provision.uci ]; then
@@ -2305,7 +2305,7 @@ def api_config_by_mac(mac: str, token: str = "", db: sqlite3.Connection = Depend
         return _JSONResponse(
             {"error": "device_not_claimed", "mac": mac,
              "hint": "Geraet zuerst per /api/claim registrieren"},
-            status_code=404)
+            status_code=409)
     # Projekt + Template + Rolle laden (gleiche Logik wie /api/deploy/{mac}/ssh-push)
     proj_row = db.execute("SELECT settings FROM projects WHERE name=?", (d["project"],)).fetchone()
     settings = json.loads((proj_row["settings"] if proj_row else None) or "{}")
@@ -3269,7 +3269,7 @@ def ui_setup(request: Request, db: sqlite3.Connection=Depends(get_db), _=Depends
   <a class='btn' href='/download/provision.conf' style='padding:.2em .7em;font-size:.8em'>⬇️ Download</a>
 </div>
 <pre id='conf-preview' style='margin:0;user-select:all'>SERVER={server_url}
-TOKEN={ENROLLMENT_TOKEN}</pre>
+TOKEN='{ENROLLMENT_TOKEN}'</pre>
 </div>
 
 <div class='card card-green'>
@@ -3542,7 +3542,7 @@ def dl_provision_conf(request: Request, _=Depends(check_admin)):
             server_override = f"{server_override}:8000"
         server_url = f"http://{server_override}"
     return PlainTextResponse(
-        f"SERVER={server_url}\nTOKEN={ENROLLMENT_TOKEN}\n",
+        f"SERVER={server_url}\nTOKEN='{ENROLLMENT_TOKEN}'\n",
         headers={"Content-Disposition": 'attachment; filename="provision.conf"'}
     )
 
@@ -3575,10 +3575,10 @@ def get_provision_sh(request: Request):
     server = str(request.base_url).rstrip("/")
     return f"""#!/bin/sh
 SERVER="{server}"
-TOKEN="{ENROLLMENT_TOKEN}"
+TOKEN='{ENROLLMENT_TOKEN}'
 cat > /etc/provision.conf <<EOF
 SERVER=$SERVER
-TOKEN=$TOKEN
+TOKEN='$TOKEN'
 EOF
 wget -q -O /etc/uci-defaults/99-provision "$SERVER/download/99-provision.sh"
 chmod +x /etc/uci-defaults/99-provision

@@ -5,6 +5,25 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.6] – 2026-03-01
+
+### Behoben
+
+- **`/api/config/{mac}` – HTTP-Status 404 → 409**: Gerät nicht geclaimt lieferte bisher
+  404 (Not Found). Nun 409 (Conflict) – semantisch korrekt: Gerät ist bekannt aber noch
+  nicht registriert. Body bleibt `{"error": "device_not_claimed", "mac": "...", "hint": "..."}`.
+
+- **`provision.conf` TOKEN in Single-Quotes**: `TOKEN='<wert>'` verhindert
+  Shell-Expansion von Sonderzeichen (z. B. `$`) beim Sourcen der Datei.
+  Gilt für: `/download/provision.conf` (Download), Setup-UI HTML-Vorschau,
+  und `/provision.sh` Legacy-Endpoint.
+
+- **Config-wget ohne `2>/dev/null`**: Der wget-Aufruf für `/api/config` gibt nun
+  HTTP-Fehler direkt aus (z. B. „409 Conflict"), statt sie stillschweigend zu
+  verschlucken. Erleichtert Debugging im SSH-Installer-Log erheblich.
+
+---
+
 ## [0.4.5] – 2026-03-01
 
 ### Behoben

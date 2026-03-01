@@ -1,4 +1,4 @@
-# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.5
+# CONTINUE_PROMPT – OpenWrt Provisioning Server v0.4.6
 
 > Stand: 2026-03-01 | Datei: server.py (~6200 Zeilen) | DB: provision.db (SQLite)
 
@@ -6,7 +6,7 @@
 
 ## Aktueller Status
 
-Der Server ist **stabil und produktionsbereit**. Version 0.4.5 wurde vollstaendig implementiert.
+Der Server ist **stabil und produktionsbereit**. Version 0.4.6 wurde vollstaendig implementiert.
 
 ### Was laeuft
 
@@ -39,6 +39,7 @@ Der Server ist **stabil und produktionsbereit**. Version 0.4.5 wurde vollstaendi
 | Image-Pakete-Card Setup-UI | OK | NEU v0.4.3: wpad-wolfssl, kmod-batman-adv etc. |
 | 99-provision.sh Claim JSON | OK | NEU v0.4.4: base_mac + Content-Type: application/json |
 | 99-provision.sh BusyBox-Fix | OK | NEU v0.4.5: --header='...' Syntax, kein touch bei Fehler, TOKEN single-quote |
+| /api/config 409 + provision.conf Quotes | OK | NEU v0.4.6: 404→409, TOKEN='...' in provision.conf, cfg-wget ohne 2>/dev/null |
 
 ---
 
