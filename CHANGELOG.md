@@ -5,6 +5,37 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.7] – 2026-03-01
+
+### Behoben / Verbessert
+
+- **BusyBox-Kompatibilitätscheck für `--header`** (neu):
+  Das Script prüft jetzt vor dem Claim, ob `wget --header` unterstützt wird:
+  ```sh
+  if wget --help 2>&1 | grep -q -- '--header'; then
+  ```
+  - **Wenn ja**: JSON-Claim mit `--header='Content-Type: application/json'` (wie bisher)
+  - **Wenn nein** (minimales BusyBox ohne `--header`): Form-Data-Fallback:
+    `--post-data "base_mac=$MAC&board_name=$BOARD&model=$MODEL&token=$TOKEN"`
+    Der Server akzeptiert beide Formate seit v0.4.3.
+
+- **`-q` entfernt** von Claim- und Config-wget: HTTP-Fehler (z. B. 409, 403, Verbindungsfehler)
+  sind jetzt direkt im SSH-Installer-Log sichtbar. Kein stilles Verschlucken mehr.
+
+- **`BATCH_RC` und `COMMIT_RC` explizit geprüft**:
+  `uci batch` und `uci commit` werden einzeln ausgewertet. Bei Fehler:
+  - `exit 1` → Script-Job im Dashboard als FAIL markiert
+  - kein `touch /etc/provisioned` → nächster Boot versucht erneut
+  Nur wenn beide RCs `0` sind, wird `/etc/provisioned` gesetzt.
+
+- **`CFG_RC` und `CFG_SIZE` als separate Zeilen**:
+  ```sh
+  echo "CFG_RC:$?"
+  echo "CFG_SIZE:$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)"
+  ```
+
+---
+
 ## [0.4.6] – 2026-03-01
 
 ### Behoben

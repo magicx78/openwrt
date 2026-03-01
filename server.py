@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.6"
+__version__ = "0.4.7"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1301,25 +1301,58 @@ MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
 echo "MAC: $MAC | Board: $BOARD | Model: $MODEL"
 echo "Server: $SERVER"
 
+# BusyBox-Kompatibilitaetscheck: unterstuetzt wget --header?
+if wget --help 2>&1 | grep -q -- '--header'; then
+  WGET_HDR=1
+else
+  WGET_HDR=0
+fi
+echo "wget --header: $WGET_HDR"
+
+# Schritt 1: Claim (JSON wenn --header verfuegbar, sonst Form-Data-Fallback)
 echo "Claim..."
-CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
-wget -q -O /tmp/claim.json --header='Content-Type: application/json' --post-data "$CLAIM_JSON" "$SERVER/api/claim"
+if [ "$WGET_HDR" = "1" ]; then
+  CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
+  wget -O /tmp/claim.json \\
+    --header='Content-Type: application/json' \\
+    --post-data "$CLAIM_JSON" \\
+    "$SERVER/api/claim"
+else
+  wget -O /tmp/claim.json \\
+    --post-data "base_mac=$MAC&board_name=$BOARD&model=$MODEL&token=$TOKEN" \\
+    "$SERVER/api/claim"
+fi
 echo "CLAIM_RC:$?"
 [ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
 
+# Schritt 2: Config laden (HTTP-Fehler sichtbar, kein -q)
 echo "Config..."
-wget -q -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
-echo "CFG_RC:$? SIZE:$(wc -c </tmp/provision.uci 2>/dev/null || echo 0)"
+wget -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
+echo "CFG_RC:$?"
+echo "CFG_SIZE:$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)"
 
+# Schritt 3: Config anwenden – provisioned nur bei vollstaendigem Erfolg
 if [ -s /tmp/provision.uci ]; then
   echo "Apply..."
   uci batch < /tmp/provision.uci
+  BATCH_RC=$?
+  echo "BATCH_RC:$BATCH_RC"
+  if [ "$BATCH_RC" != "0" ]; then
+    echo "FAIL: uci batch fehlgeschlagen – provisioned NICHT gesetzt"
+    exit 1
+  fi
   uci commit
+  COMMIT_RC=$?
+  echo "COMMIT_RC:$COMMIT_RC"
+  if [ "$COMMIT_RC" != "0" ]; then
+    echo "FAIL: uci commit fehlgeschlagen – provisioned NICHT gesetzt"
+    exit 1
+  fi
   touch /etc/provisioned
   /etc/init.d/network restart 2>/dev/null || true
-  echo "OK"
+  echo "OK – Provisioning abgeschlossen"
 else
-  echo "FAIL: Keine Config (nicht provisioned gesetzt!)"
+  echo "FAIL: Keine Config – provisioned NICHT gesetzt"
   echo "     Dashboard: $SERVER/ui/ – Projekt zuweisen, dann erneut booten"
   exit 1
 fi
