@@ -6,7 +6,7 @@
 
 ## Aktueller Status
 
-Der Server ist **stabil und produktionsbereit**. Version 0.4.2 wurde vollstaendig implementiert.
+Der Server ist **stabil und produktionsbereit**. Version 0.4.3 wurde vollstaendig implementiert.
 
 ### Was laeuft
 
