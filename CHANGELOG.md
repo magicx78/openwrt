@@ -5,6 +5,31 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.1] – 2026-03-01
+
+### Behoben / Gehärtet
+
+- **`json_escape()`-Funktion im Bootstrap-Script**: Alle Claim-Payload-Felder
+  (`MAC`, `BOARD`, `MODEL`, `TOKEN`) werden vor dem Einbetten in den JSON-Body
+  escaped (`\` → `\\`, `"` → `\"`). Verhindert JSON-Injection und Syntaxfehler
+  bei Sonderzeichen in Board-Namen oder Token.
+
+- **wget-Pfad: Claim-Body auf Fehlermuster prüfen**: Nach RC=0 prüft
+  `grep -qiE '"detail":|<html|HTTP error'` den Response-Body. Bei Treffer:
+  Response-Anfang ins Log, `exit 1`. Verhindert stilles Scheitern, wenn der
+  Server einen HTTP-Fehler mit Body liefert, den wget als Erfolg wertet.
+
+- **`curl -fsS` statt `-sS` für Config-Download**: `-f` = `--fail` lässt curl
+  bei HTTP 4xx/5xx mit Exit-Code 22 scheitern. Die UCI-Config wird so niemals
+  von einer Fehlerseite überschrieben, selbst wenn kein separater Status-Check
+  folgt.
+
+- **`CFG_SIZE -lt 10` → `exit 1`**: Nach dem Config-Download wird die Dateigröße
+  geprüft. Weniger als 10 Bytes → wahrscheinlich eine Mini-Fehlerantwort oder
+  leere Config → `exit 1`. Fängt Grenzfälle ab, die `[ ! -s ]` nicht abdeckt.
+
+---
+
 ## [0.5.0] – 2026-03-01
 
 ### Neu / Komplett überarbeitet

@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1282,7 +1282,7 @@ def _generate_provision_sh(server_url: str, token: str) -> str:
     """Generiert das 99-provision.sh Bootstrap-Script dynamisch.
     Wird von /download/99-provision.sh und /api/setup/quick-ssh genutzt."""
     return f"""#!/bin/sh
-# OpenWrt Provisioning Bootstrap v0.5.0 – auto-generiert
+# OpenWrt Provisioning Bootstrap v0.5.1 – auto-generiert
 
 # ─── Konfiguration (Defaults; /etc/provision.conf ueberschreibt) ──────────────
 SERVER="{server_url}"
@@ -1292,7 +1292,7 @@ TOKEN='{token}'
 # ─── Logging (stdout + /tmp/provision.log) ────────────────────────────────────
 LOG=/tmp/provision.log
 log() {{ echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }}
-log "=== Provisioning Start v0.5.0 ==="
+log "=== Provisioning Start v0.5.1 ==="
 log "SERVER=$SERVER"
 
 # ─── Idempotenz ───────────────────────────────────────────────────────────────
@@ -1318,9 +1318,18 @@ else
 fi
 log "HTTP_CLIENT=$HTTP_CLIENT"
 
+# ─── JSON-Escape: \ und " escapen fuer sichere Payload-Erzeugung ─────────────
+json_escape() {{
+  printf '%s' "$1" | sed 's/\\\\/\\\\\\\\/g' | sed 's/"/\\\\"/g'
+}}
+
 # ─── Schritt 1: Claim – JSON-POST, niemals Form-Data ─────────────────────────
 log "Claim..."
-CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
+ESC_MAC=$(json_escape "$MAC")
+ESC_BOARD=$(json_escape "$BOARD")
+ESC_MODEL=$(json_escape "$MODEL")
+ESC_TOKEN=$(json_escape "$TOKEN")
+CLAIM_JSON="{{\\"base_mac\\":\\"$ESC_MAC\\",\\"board_name\\":\\"$ESC_BOARD\\",\\"model\\":\\"$ESC_MODEL\\",\\"token\\":\\"$ESC_TOKEN\\"}}"
 if [ "$HTTP_CLIENT" = "curl" ]; then
   CLAIM_HTTP_CODE=$(curl -sS -w "%{{http_code}}" \\
     -o /tmp/claim.json \\
@@ -1335,6 +1344,11 @@ else
     "$SERVER/api/claim" 2>>"$LOG"
   CLAIM_RC=$?
   CLAIM_HTTP_CODE="n/a"
+  if [ "$CLAIM_RC" = "0" ] && grep -qiE '"detail":|<html|HTTP error' /tmp/claim.json 2>/dev/null; then
+    log "FAIL: Claim-Antwort enthaelt Fehler-Body (wget-Pfad)"
+    log "RESP: $(head -c 200 /tmp/claim.json)"
+    exit 1
+  fi
 fi
 log "CLAIM_RC=$CLAIM_RC CLAIM_HTTP_CODE=$CLAIM_HTTP_CODE"
 [ -s /tmp/claim.json ] && log "CLAIM_RESP: $(head -c 200 /tmp/claim.json)"
@@ -1354,7 +1368,7 @@ fi
 # ─── Schritt 2: Config laden – Validierung auf mehreren Ebenen ────────────────
 log "Config Download..."
 if [ "$HTTP_CLIENT" = "curl" ]; then
-  CFG_HTTP_CODE=$(curl -sS -w "%{{http_code}}" \\
+  CFG_HTTP_CODE=$(curl -fsS -w "%{{http_code}}" \\
     -o /tmp/provision.uci \\
     "$SERVER/api/config/$MAC?token=$TOKEN" 2>>"$LOG")
   CFG_RC=$?
@@ -1368,6 +1382,11 @@ CFG_SIZE=$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)
 log "CFG_RC=$CFG_RC CFG_HTTP_CODE=$CFG_HTTP_CODE CFG_SIZE=$CFG_SIZE"
 if [ "$CFG_RC" != "0" ]; then
   log "FAIL: Config-Download fehlgeschlagen (RC=$CFG_RC)"; exit 1
+fi
+if [ "$CFG_SIZE" -lt 10 ]; then
+  log "FAIL: Config zu klein ($CFG_SIZE Bytes) – Fehlerantwort oder leere Config?"
+  [ -s /tmp/provision.uci ] && log "CONTENT: $(head -c 100 /tmp/provision.uci)"
+  exit 1
 fi
 if [ "$HTTP_CLIENT" = "curl" ]; then
   case "$CFG_HTTP_CODE" in
