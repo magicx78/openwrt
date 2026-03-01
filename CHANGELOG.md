@@ -5,6 +5,28 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.4.8] – 2026-03-01
+
+### Behoben / Verbessert
+
+- **Form-Data-Fallback entfernt**: `--post-data "base_mac=..."` als Fallback entfernt.
+  Kein Content-Type-Kompromiss: falsches Format → stilles 422. Nicht akzeptabel.
+
+- **curl als sauberer Fallback** (kein Form-Data): Wenn `wget --header` nicht verfuegbar:
+  - `command -v curl` → JSON via `curl -X POST -H 'Content-Type: application/json'`
+  - Sonst: `echo "FAIL: Kein JSON-POST moeglich ..." && exit 1`
+
+- **`CLAIM_RC` als Variable + sofortiger `exit 1`**: `CLAIM_RC=$?` gespeichert,
+  bei Fehler bricht das Script sofort ab – kein Config-Download ohne Claim.
+
+- **Config-Download konsistent**: Nutzt `HTTP_CLIENT` (wget oder curl) konsequent
+  fuer beide Requests. `CFG_RC=$?` und `SIZE=$(...)` als Variablen vor dem echo.
+
+- **`HTTP_CLIENT` einmalig bestimmt**: `wget --help`-Check laeuft einmal am Anfang,
+  nicht separat fuer Claim und Config.
+
+---
+
 ## [0.4.7] – 2026-03-01
 
 ### Behoben / Verbessert

@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -1301,35 +1301,51 @@ MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")
 echo "MAC: $MAC | Board: $BOARD | Model: $MODEL"
 echo "Server: $SERVER"
 
-# BusyBox-Kompatibilitaetscheck: unterstuetzt wget --header?
+# HTTP-Client bestimmen: wget (mit --header) bevorzugt, dann curl, sonst Abbruch
 if wget --help 2>&1 | grep -q -- '--header'; then
-  WGET_HDR=1
+  HTTP_CLIENT=wget
+elif command -v curl >/dev/null 2>&1; then
+  HTTP_CLIENT=curl
 else
-  WGET_HDR=0
+  echo "FAIL: Kein JSON-POST moeglich (wget ohne --header und kein curl)"
+  exit 1
 fi
-echo "wget --header: $WGET_HDR"
+echo "HTTP_CLIENT: $HTTP_CLIENT"
 
-# Schritt 1: Claim (JSON wenn --header verfuegbar, sonst Form-Data-Fallback)
+# Schritt 1: Claim – JSON-POST, kein Form-Data-Fallback
 echo "Claim..."
-if [ "$WGET_HDR" = "1" ]; then
-  CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
+CLAIM_JSON="{{\\"base_mac\\":\\"$MAC\\",\\"board_name\\":\\"$BOARD\\",\\"model\\":\\"$MODEL\\",\\"token\\":\\"$TOKEN\\"}}"
+if [ "$HTTP_CLIENT" = "wget" ]; then
   wget -O /tmp/claim.json \\
     --header='Content-Type: application/json' \\
     --post-data "$CLAIM_JSON" \\
     "$SERVER/api/claim"
 else
-  wget -O /tmp/claim.json \\
-    --post-data "base_mac=$MAC&board_name=$BOARD&model=$MODEL&token=$TOKEN" \\
+  curl -X POST \\
+    -H 'Content-Type: application/json' \\
+    -d "$CLAIM_JSON" \\
+    -o /tmp/claim.json \\
     "$SERVER/api/claim"
 fi
-echo "CLAIM_RC:$?"
+CLAIM_RC=$?
+echo "CLAIM_RC:$CLAIM_RC"
 [ -s /tmp/claim.json ] && head -n 20 /tmp/claim.json
+if [ "$CLAIM_RC" != "0" ]; then
+  echo "FAIL: Claim fehlgeschlagen (RC:$CLAIM_RC) – Provisioning abgebrochen"
+  exit 1
+fi
 
-# Schritt 2: Config laden (HTTP-Fehler sichtbar, kein -q)
+# Schritt 2: Config laden – HTTP-Fehler sichtbar, kein -q/-s
 echo "Config..."
-wget -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
-echo "CFG_RC:$?"
-echo "CFG_SIZE:$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)"
+if [ "$HTTP_CLIENT" = "wget" ]; then
+  wget -O /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
+else
+  curl -o /tmp/provision.uci "$SERVER/api/config/$MAC?token=$TOKEN"
+fi
+CFG_RC=$?
+SIZE=$(wc -c < /tmp/provision.uci 2>/dev/null || echo 0)
+echo "CFG_RC:$CFG_RC"
+echo "CFG_SIZE:$SIZE"
 
 # Schritt 3: Config anwenden – provisioned nur bei vollstaendigem Erfolg
 if [ -s /tmp/provision.uci ]; then
