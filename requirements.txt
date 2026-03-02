@@ -1,4 +1,20 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+# OpenWrt Provisioning Server – Dependencies
+
+# Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
-paramiko>=3.4.0
+
+# SSH & Network
+paramiko>=3.3.1
+python-dateutil>=2.8.2
+
+# Optional but recommended
+uvloop>=0.17.0  # Fast event loop for uvicorn
+pydantic>=2.0.0  # Data validation
+
+# Development (optional)
+# pytest>=7.4.0
+# black>=23.7.0
+# mypy>=1.5.0
+# ruff>=0.1.0
