@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, Res
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-__version__ = "0.5.6"
+__version__ = "0.6.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provisioning Diagnose (Server + optional Router read-only)
@@ -67,6 +67,221 @@ def _log_activity(typ: str, mac: str = "-", msg: str = "") -> None:
     _debug_activity.insert(0, event)
     if len(_debug_activity) > 100:
         _debug_activity.pop()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UCI Generator System (v0.6.0) – OpenWrt Config Parser & Client-Binding Engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UCIParser:
+    """Parst /etc/config/* Text-Format zu strukturierten Daten."""
+
+    @staticmethod
+    def parse_config(config_text: str) -> Dict[str, Any]:
+        """Parst UCI-Format Config (wie uci export) zu dict."""
+        result = {}
+        current_section = None
+        current_section_type = None
+        current_section_name = None
+
+        for line in config_text.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            # package.section='type'
+            if "='" in line and not line.startswith('set '):
+                m = re.match(r"(\w+)\.(['\"]?)(@\w+|\w+)(['\")?'?]=\'(.*?)\'", line)
+                if m:
+                    pkg, _, sec, _, val = m.groups()
+                    if pkg not in result:
+                        result[pkg] = {}
+                    if sec not in result[pkg]:
+                        result[pkg][sec] = {}
+                    result[pkg][sec] = val
+                    current_section = sec
+                    current_section_type = val
+                    current_section_name = sec
+
+            # set package.section.option='value'
+            elif line.startswith('set '):
+                m = re.match(r"set (\w+)\.(['\"]?)(.+?)['\")?'?]\.(\w+)=\'(.*?)\'", line)
+                if m:
+                    pkg, _, sec, opt, val = m.groups()
+                    if pkg not in result:
+                        result[pkg] = {}
+                    if sec not in result[pkg]:
+                        result[pkg][sec] = {}
+                    if not isinstance(result[pkg][sec], dict):
+                        result[pkg][sec] = {}
+                    result[pkg][sec][opt] = val
+
+        return result
+
+    @staticmethod
+    def extract_wireless_info(config: Dict) -> List[Dict[str, str]]:
+        """Extrahiert Wireless-Interface Info aus geparster Config."""
+        wireless = config.get('wireless', {})
+        interfaces = []
+        for iface_name, iface_cfg in wireless.items():
+            if isinstance(iface_cfg, dict):
+                interfaces.append({
+                    "name": iface_name,
+                    "type": iface_cfg.get('type', 'unknown'),
+                    "ifname": iface_cfg.get('ifname', ''),
+                    "ssid": iface_cfg.get('ssid', ''),
+                    "bssid": iface_cfg.get('bssid', ''),
+                    "disabled": iface_cfg.get('disabled', '0'),
+                    "device": iface_cfg.get('device', '')
+                })
+        return interfaces
+
+    @staticmethod
+    def extract_network_info(config: Dict) -> Dict[str, Any]:
+        """Extrahiert Network/Interface Info."""
+        network = config.get('network', {})
+        return {k: v for k, v in network.items() if isinstance(v, dict)}
+
+
+class ClientBindingEngine:
+    """Client-Binding Logic: BSSID-Lock, 802.11k/v/r, VLAN-Move."""
+
+    @staticmethod
+    def generate_bssid_lock_commands(wireless_info: List[Dict],
+                                      target_ap_idx: int) -> List[str]:
+        """BSSID-Lock: Client nur auf einer bestimmten AP."""
+        cmds = []
+        target = wireless_info[target_ap_idx]
+
+        # Nur auf Target-AP activieren
+        for idx, iface in enumerate(wireless_info):
+            if idx == target_ap_idx:
+                # Target AP: enable + BSSID-Lock
+                cmds.append(f"uci set wireless.{iface['name']}.disabled='0'")
+                cmds.append(f"uci set wireless.{iface['name']}.bssid='{target['bssid']}'")
+            else:
+                # Andere APs: disable oder remove BSSID-Lock
+                cmds.append(f"uci delete wireless.{iface['name']}.bssid")
+
+        return cmds
+
+    @staticmethod
+    def generate_80211kvr_commands(wireless_info: List[Dict]) -> List[str]:
+        """802.11k/v/r (Roaming): FT-PSK, Mobility Domain, WNM."""
+        cmds = []
+
+        for iface in wireless_info:
+            if iface['disabled'] == '0':
+                cmds.append(f"uci set wireless.{iface['name']}.ieee80211r='1'")
+                cmds.append(f"uci set wireless.{iface['name']}.ft_psk_generate_local='1'")
+                cmds.append(f"uci set wireless.{iface['name']}.ft_over_ds='1'")
+                # Mobility Domain (MDID): 2-byte hex, e.g., '1122'
+                cmds.append(f"uci set wireless.{iface['name']}.mobility_domain='1122'")
+
+        return cmds
+
+    @staticmethod
+    def generate_block_on_other_aps(wireless_info: List[Dict],
+                                    client_mac: str,
+                                    target_ap_idx: int) -> List[str]:
+        """Kick + Block Client auf allen APs außer Target."""
+        cmds = []
+
+        for idx, iface in enumerate(wireless_info):
+            if idx != target_ap_idx and iface['disabled'] == '0':
+                # Firewall: Block this MAC
+                mac_clean = client_mac.replace(":", "")
+                cmds.append(f"uci add firewall rule")
+                cmds.append(f"uci set firewall.@rule[-1].name='Block_Client_{mac_clean}'")
+                cmds.append(f"uci set firewall.@rule[-1].src='guest'")
+                cmds.append(f"uci set firewall.@rule[-1].dest='lan'")
+                cmds.append(f"uci set firewall.@rule[-1].family='ipv4'")
+                cmds.append(f"uci set firewall.@rule[-1].proto='all'")
+                cmds.append(f"uci set firewall.@rule[-1].target='REJECT'")
+
+        return cmds
+
+
+class UCIGenerator:
+    """Generiert checks/apply/rollback aus Konfigurationen."""
+
+    @staticmethod
+    def generate_uci_batch(action: str,
+                           wireless_info: List[Dict],
+                           config: Dict,
+                           client_mac: str,
+                           target_ap_idx: int,
+                           extra: Dict = None) -> Dict[str, Any]:
+        """Hauptfunktion: Generiert komplette UCI-Batch mit checks/apply/rollback."""
+
+        extra = extra or {}
+        result = {
+            "platform": "openwrt",
+            "assumptions": [],
+            "checks": [],
+            "apply": [],
+            "rollback": [],
+            "warnings": []
+        }
+
+        # Assumptions
+        result["assumptions"] = [
+            f"Target AP Index {target_ap_idx} existiert in wireless_info",
+            f"Client {client_mac} ist aktuell mit WiFi verbunden",
+            "Router hat internet/NTP für FT-Timing"
+        ]
+
+        # Checks (read-only)
+        result["checks"] = [
+            {"cmd": "uci show wireless | grep -E '(ssid|bssid|disabled)'", "why": "Alle WiFi-Interfaces auflisten"},
+            {"cmd": "iw dev wlan0 link", "why": "Client aktuelle BSSID + Signal-Strength"},
+            {"cmd": "iw dev wlan0 station dump | grep -i " + client_mac, "why": "Client-Statistiken"},
+            {"cmd": "logread | tail -20", "why": "Letzte System-Logs checken"}
+        ]
+
+        # Apply commands basierend auf Action
+        apply_cmds = []
+        rollback_cmds = []
+
+        if action == "bind_to_bssid":
+            apply_cmds = ClientBindingEngine.generate_bssid_lock_commands(wireless_info, target_ap_idx)
+            # Rollback: BSSID-Lock entfernen
+            for iface in wireless_info:
+                rollback_cmds.append(f"uci delete wireless.{iface['name']}.bssid")
+
+        elif action == "enable_80211kvr":
+            apply_cmds = ClientBindingEngine.generate_80211kvr_commands(wireless_info)
+            # Rollback
+            for iface in wireless_info:
+                rollback_cmds.append(f"uci delete wireless.{iface['name']}.ieee80211r")
+                rollback_cmds.append(f"uci delete wireless.{iface['name']}.ft_psk_generate_local")
+
+        elif action == "block_on_other_aps":
+            apply_cmds = ClientBindingEngine.generate_block_on_other_aps(wireless_info, client_mac, target_ap_idx)
+            # Rollback: Firewall-Rules löschen
+            rollback_cmds = [
+                f"uci delete firewall.@rule[$(uci show firewall | grep \"Block_Client_{client_mac.replace(':','')}\" | head -1 | cut -d. -f2)]"
+            ]
+
+        # Convert to result format
+        result["apply"] = [{"cmd": cmd, "why": f"[{action}] Schritt"} for cmd in apply_cmds]
+        result["rollback"] = [{"cmd": cmd, "why": f"[{action}] Undo"} for cmd in rollback_cmds]
+
+        # Final commands: commit + reload
+        result["apply"].append({"cmd": "uci commit wireless", "why": "Wireless-Changes speichern"})
+        result["apply"].append({"cmd": "uci commit firewall", "why": "Firewall-Changes speichern"})
+        result["apply"].append({"cmd": "/etc/init.d/network reload", "why": "Netzwerk neustarten"})
+        result["rollback"].append({"cmd": "/etc/init.d/network reload", "why": "Netzwerk-Reload (Undo)"})
+
+        # Warnings
+        if target_ap_idx >= len(wireless_info):
+            result["warnings"].append(f"⚠️ AP-Index {target_ap_idx} ungültig (nur {len(wireless_info)} vorhanden)")
+        if action == "bind_to_bssid" and not wireless_info[target_ap_idx].get('bssid'):
+            result["warnings"].append("⚠️ Target AP hat keine feste BSSID – kann Auto-BSSID nicht locken")
+        if action == "enable_80211kvr":
+            result["warnings"].append("⚠️ 802.11k/v/r erfordert WPA2/WPA3 – WEP/Open wird ignoriert")
+
+        return result
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Datetime-Helpers: intern immer UTC timezone-aware
@@ -1870,6 +2085,7 @@ pre{{background:#161b22;padding:1em;border-radius:6px;overflow-x:auto;border:1px
   {_nav("/ui/settings","⚙️","Einstellungen")}
   <span class="sep">|</span>
   {_nav("/ui/ssh-generator","🔑","SSH-Generator")}
+  {_nav("/ui/uci-generator","⚙️","UCI-Gen")}
   {_nav("/ui/setup","🚀","Setup")}
   {_nav("/ui/debug","🔧","Debug")}
 </nav>
@@ -7089,6 +7305,72 @@ def api_debug_status(db: sqlite3.Connection = Depends(get_db),
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# API: UCI Generator  –  Client-Binding & OpenWrt Config Generator (v0.6.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/uci/generate")
+async def api_uci_generate(request: Request,
+                           _=Depends(check_admin)):
+    """Generiert UCI-Batch mit checks/apply/rollback für Client-Binding."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Ungültiges JSON")
+
+    config_text = body.get("config_text", "")
+    client_mac = body.get("client_mac", "").upper()
+    ap_id = body.get("ap_id", "")
+    action = body.get("action", "")  # bind_to_bssid, enable_80211kvr, block_on_other_aps
+    extra = body.get("extra", {})
+
+    if not config_text or not client_mac or not ap_id or not action:
+        raise HTTPException(400, "config_text, client_mac, ap_id, action erforderlich")
+
+    try:
+        # 1. Parse Config
+        parser = UCIParser()
+        config = parser.parse_config(config_text)
+        wireless_info = parser.extract_wireless_info(config)
+
+        if not wireless_info:
+            return {"ok": False, "error": "Keine Wireless-Interfaces in Config gefunden"}
+
+        # 2. Find target AP index
+        target_ap_idx = None
+        for idx, iface in enumerate(wireless_info):
+            if ap_id in iface.get('name', ''):
+                target_ap_idx = idx
+                break
+
+        if target_ap_idx is None:
+            return {"ok": False, "error": f"AP {ap_id} nicht gefunden in Config"}
+
+        # 3. Generate UCI batch
+        generator = UCIGenerator()
+        result = generator.generate_uci_batch(
+            action=action,
+            wireless_info=wireless_info,
+            config=config,
+            client_mac=client_mac,
+            target_ap_idx=target_ap_idx,
+            extra=extra
+        )
+
+        result["ok"] = True
+        result["config_parsed"] = {
+            "wireless_interfaces": len(wireless_info),
+            "target_ap": wireless_info[target_ap_idx] if target_ap_idx < len(wireless_info) else None
+        }
+
+        _log_activity("uci", client_mac, f"✅ UCI-Batch generiert ({action})")
+        return result
+
+    except Exception as e:
+        _log_activity("uci", client_mac, f"❌ UCI-Generator Error: {str(e)[:50]}")
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/ui/debug", response_class=HTMLResponse)
 def ui_debug(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
     """Live Debug Dashboard: Jobs + Activity-Log mit Auto-Refresh."""
@@ -7200,3 +7482,208 @@ updateStatus();
 setInterval(updateStatus, 2000);
 </script>"""
     return _page(content, "Debug", "/ui/debug")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: UCI Generator  –  Client-Binding Config Generator (v0.6.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/ui/uci-generator", response_class=HTMLResponse)
+def ui_uci_generator(_=Depends(check_admin)):
+    """UCI-Generator UI: Config upload → Client-Binding → UCI-Batch preview."""
+    content = r"""
+<h2>⚙️ UCI Generator – Client-Binding</h2>
+
+<div class='card card-blue'>
+  <b>ℹ️ Automatisches OpenWrt UCI-Script-Generator</b><br>
+  Lade eine Router-Konfiguration hoch, wähle Client + Ziel-AP + Aktion.
+  Server generiert automatisch <b>checks</b> (readonly), <b>apply</b> (Befehle), <b>rollback</b> (Undo).
+  <br><br>
+  <b>Aktionen:</b>
+  bind_to_bssid (BSSID-Lock) | enable_80211kvr (Roaming) | block_on_other_aps (Isolation)
+</div>
+
+<div class='card'>
+<h3>① Config hochladen</h3>
+<textarea id='config-text' placeholder='Paste /etc/config/wireless, network, firewall...
+Oder: Router: cat /etc/config/* | copy-paste' style='width:100%;height:150px;font-family:monospace;font-size:.85em'></textarea>
+</div>
+
+<div class='grid2' style='gap:.7em;margin:.7em 0'>
+  <div class='card'>
+    <h3>② Client + Ziel</h3>
+    <table style='width:100%'>
+      <tr><td>🔗 Client MAC</td><td><input type='text' id='client-mac' placeholder='aa:bb:cc:dd:ee:ff'></td></tr>
+      <tr><td>🖥️ Ziel-AP</td><td><input type='text' id='ap-id' placeholder='wlan0 oder ap-001'></td></tr>
+      <tr><td>⚡ Aktion</td>
+          <td><select id='action'>
+            <option value='bind_to_bssid'>🔒 BSSID-Lock (Client nur auf dieser AP)</option>
+            <option value='enable_80211kvr'>🔄 802.11k/v/r (Roaming aktivieren)</option>
+            <option value='block_on_other_aps'>🚫 Block on Others (nur diese AP nutzen)</option>
+          </select></td></tr>
+    </table>
+  </div>
+
+  <div class='card'>
+    <h3>③ Generieren</h3>
+    <button class='btn btn-green' style='width:100%;padding:.5em' onclick='generateUCI()'>⚡ UCI-Batch generieren</button>
+    <div id='gen-status' style='margin-top:.5em;font-size:.9em'></div>
+  </div>
+</div>
+
+<!-- RESULTS TABS -->
+<div id='results-div' style='display:none'>
+  <div style='display:flex;gap:.5em;margin:.7em 0;flex-wrap:wrap'>
+    <button class='btn' onclick='showTab("checks")' id='btn-checks'>✓ Checks</button>
+    <button class='btn' onclick='showTab("apply")' id='btn-apply'>→ Apply</button>
+    <button class='btn' onclick='showTab("rollback")' id='btn-rollback'>↶ Rollback</button>
+    <button class='btn' onclick='showTab("warnings")' id='btn-warnings'>⚠️ Warnings</button>
+  </div>
+
+  <!-- Checks Tab -->
+  <div id='tab-checks' class='card' style='display:none;background:#1a1a1a;padding:1em'>
+    <h3>✓ Read-Only Checks</h3>
+    <p class='muted' style='font-size:.9em'>Diese Befehle werden <b>NICHT</b> verändert – nur Informationen sammeln:</p>
+    <div id='checks-list'></div>
+  </div>
+
+  <!-- Apply Tab -->
+  <div id='tab-apply' class='card' style='display:none;background:#1a1a1a;padding:1em'>
+    <h3>→ Apply Commands</h3>
+    <p class='muted' style='font-size:.9em'>Diese Befehle führen die Aktion durch:</p>
+    <div id='apply-list'></div>
+    <button class='btn btn-orange' style='margin-top:.7em;width:100%' onclick='copyCommands("apply")'>📋 Alle kopieren</button>
+  </div>
+
+  <!-- Rollback Tab -->
+  <div id='tab-rollback' class='card' style='display:none;background:#1a1a1a;padding:1em'>
+    <h3>↶ Rollback Commands</h3>
+    <p class='muted' style='font-size:.9em'>Diese Befehle machen die Änderungen rückgängig:</p>
+    <div id='rollback-list'></div>
+    <button class='btn btn-orange' style='margin-top:.7em;width:100%' onclick='copyCommands("rollback")'>📋 Alle kopieren</button>
+  </div>
+
+  <!-- Warnings Tab -->
+  <div id='tab-warnings' class='card' style='display:none;background:#1a1a1a;padding:1em'>
+    <h3>⚠️ Warnings</h3>
+    <div id='warnings-list'></div>
+  </div>
+</div>
+
+<script>
+let lastResult = null;
+
+async function generateUCI() {
+  const config = document.getElementById('config-text').value;
+  const clientMac = document.getElementById('client-mac').value.toUpperCase();
+  const apId = document.getElementById('ap-id').value;
+  const action = document.getElementById('action').value;
+  const stat = document.getElementById('gen-status');
+
+  if (!config || !clientMac || !apId || !action) {
+    stat.textContent = '❌ Alle Felder ausfüllen';
+    return;
+  }
+
+  stat.textContent = '⏳ Generiere UCI-Batch...';
+  try {
+    const r = await fetch('/api/uci/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({config_text: config, client_mac: clientMac, ap_id: apId, action: action})
+    });
+    if (!r.ok) {
+      stat.textContent = '❌ HTTP ' + r.status;
+      return;
+    }
+    const d = await r.json();
+    if (!d.ok) {
+      stat.textContent = '❌ ' + d.error;
+      return;
+    }
+
+    lastResult = d;
+    stat.innerHTML = '✅ UCI-Batch generiert<br>'
+                   + '<span class="muted" style="font-size:.85em">' + d.config_parsed.wireless_interfaces + ' WiFi-Interfaces, '
+                   + 'Target: ' + d.config_parsed.target_ap.name + '</span>';
+
+    // Show results
+    document.getElementById('results-div').style.display = 'block';
+    renderResults(d);
+    showTab('checks');
+  } catch(e) {
+    stat.textContent = '❌ ' + e;
+  }
+}
+
+function renderResults(data) {
+  // Checks
+  let html = '';
+  for (const c of data.checks) {
+    html += `<div style='margin:.5em 0;padding:.5em;background:#111;border-left:3px solid #3b82f6'>
+      <code style='font-size:.85em'>${escapeHtml(c.cmd)}</code><br>
+      <span class='muted' style='font-size:.8em'>${c.why}</span>
+    </div>`;
+  }
+  document.getElementById('checks-list').innerHTML = html;
+
+  // Apply
+  html = '';
+  for (const c of data.apply) {
+    html += `<div style='margin:.5em 0;padding:.5em;background:#111;border-left:3px solid #10b981'>
+      <code style='font-size:.85em'>${escapeHtml(c.cmd)}</code><br>
+      <span class='muted' style='font-size:.8em'>${c.why}</span>
+    </div>`;
+  }
+  document.getElementById('apply-list').innerHTML = html;
+
+  // Rollback
+  html = '';
+  for (const c of data.rollback) {
+    html += `<div style='margin:.5em 0;padding:.5em;background:#111;border-left:3px solid #f59e0b'>
+      <code style='font-size:.85em'>${escapeHtml(c.cmd)}</code><br>
+      <span class='muted' style='font-size:.8em'>${c.why}</span>
+    </div>`;
+  }
+  document.getElementById('rollback-list').innerHTML = html;
+
+  // Warnings
+  html = '';
+  for (const w of data.warnings) {
+    html += `<div style='margin:.5em 0;padding:.5em;background:#331111;border-left:3px solid #dc2626'>
+      ${w}
+    </div>`;
+  }
+  if (data.warnings.length === 0) {
+    html = '<div class="ok">✅ Keine Warnings</div>';
+  }
+  document.getElementById('warnings-list').innerHTML = html;
+}
+
+function showTab(tab) {
+  document.getElementById('tab-checks').style.display = 'none';
+  document.getElementById('tab-apply').style.display = 'none';
+  document.getElementById('tab-rollback').style.display = 'none';
+  document.getElementById('tab-warnings').style.display = 'none';
+  document.getElementById('tab-' + tab).style.display = 'block';
+
+  document.getElementById('btn-checks').style.background = '';
+  document.getElementById('btn-apply').style.background = '';
+  document.getElementById('btn-rollback').style.background = '';
+  document.getElementById('btn-warnings').style.background = '';
+  document.getElementById('btn-' + tab).style.background = '#1f6feb';
+}
+
+function copyCommands(type) {
+  if (!lastResult) return;
+  const cmds = lastResult[type].map(c => c.cmd).join('\\n');
+  navigator.clipboard.writeText(cmds).then(() => {
+    alert('✅ ' + cmds.split('\\n').length + ' Commands kopiert!');
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>"""
+    return _page(content, "UCI Generator", "/ui/uci-generator")
