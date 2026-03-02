@@ -11,6 +11,14 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 - **Parallelisierte SSH-Key-Installation**: `POST /api/ssh/install-all` nutzt jetzt `ThreadPoolExecutor` mit max. 6 parallelen Verbindungen statt sequenziell. **Performance +10x**: 10 Router statt 100+ Sekunden in ~15 Sekunden installiert.
 
+- **`save-template` Completeness – Network & System Blocks**:
+  - **Vorher**: `save-template` speicherte nur WLAN-Konfiguration
+  - **Nachher**: Templates enthalten nun **Network-Block** + **System-Block** (Hostname, Timezone, Log-Level)
+  - **Neue Funktionen**: `_networks_to_uci_template()` + `_system_to_uci_template()`
+  - **UI**: JavaScript `saveTemplate()` sendet jetzt auch Netzwerk-Daten (`network` parameter)
+  - **Resultat**: Aus Config-Pull gezogene Templates sind jetzt **production-ready** ohne manuelle Nachbearbeitung
+  - Template-Variablen: `{{NET_LAN_IP}}`, `{{NET_LAN_MASK}}`, `{{HOSTNAME}}`, `{{TIMEZONE}}`, etc.
+
 ### Behoben
 
 - **Dead Code Cleanup – 9 doppelte Route-Definitionen entfernt**:

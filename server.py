@@ -4668,6 +4668,39 @@ def _wlans_to_uci_template(wlans: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def _networks_to_uci_template(networks: Dict[str, Dict]) -> str:
+    """Network-Dicts → UCI-Template mit {{VAR}} Platzhaltern."""
+    if not networks:
+        return ""
+    lines = [
+        "# ── Network-Config (aus Config-Pull generiert) ─────────────────────",
+        "# Variablen: {{NET_LAN_IP}} {{NET_LAN_MASK}} {{NET_WAN_PROTO}}, etc.",
+    ]
+    for iface_name, iface_data in networks.items():
+        proto = iface_data.get("proto", "static")
+        iface_upper = iface_name.upper()
+        if iface_name == "lan":
+            lines.append("\nset network." + iface_name + ".proto='{{NET_" + iface_upper + "_PROTO|" + proto + "}}'")
+            lines.append("set network." + iface_name + ".ipaddr='{{NET_" + iface_upper + "_IP}}'")
+            lines.append("set network." + iface_name + ".netmask='{{NET_" + iface_upper + "_MASK}}'")
+            lines.append("set network." + iface_name + ".gateway='{{NET_" + iface_upper + "_GW|{{GW}}}}'")
+        else:  # wan, guest, media, etc.
+            lines.append("\nset network." + iface_name + ".proto='{{NET_" + iface_upper + "_PROTO|" + proto + "}}'")
+            lines.append("set network." + iface_name + ".ipaddr='{{NET_" + iface_upper + "_IP}}'")
+    return "\n".join(lines)
+
+
+def _system_to_uci_template() -> str:
+    """System-Basis-Config → UCI-Template."""
+    return (
+        "# ── System-Config (Basics) ─────────────────────\n"
+        "# Variablen: {{HOSTNAME}} {{TIMEZONE}}\n"
+        "set system.@system[0].hostname='{{HOSTNAME|OpenWrt}}'\n"
+        "set system.@system[0].timezone='UTC'\n"
+        "set system.@system[0].log_level='4'"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SSH-Pull-Job: Config vom Quell-Router lesen (read-only)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5012,9 +5045,15 @@ async def api_save_as_template(pull_id: str, request: Request,
     body     = await request.json()
     tpl_name = body.get("template_name", "").strip()
     wlans    = body.get("wlans", [])
+    network  = body.get("network", {})
     if not tpl_name:
         raise HTTPException(400, "Template-Name fehlt")
-    content  = _wlans_to_uci_template(wlans)
+    # Generiere alle drei Blöcke
+    net_block = _networks_to_uci_template(network) if network else ""
+    wlan_block = _wlans_to_uci_template(wlans)
+    sys_block = _system_to_uci_template()
+    # Kombiniere mit Trennleerzeilen
+    content = "\n\n".join(block for block in [net_block, wlan_block, sys_block] if block)
     now_     = now_utc().isoformat()
     ex = db.execute("SELECT id FROM templates WHERE name=?", (tpl_name,)).fetchone()
     if ex:
@@ -5529,7 +5568,8 @@ async function saveTemplate(){
   if(!name){ alert('Template-Name eingeben'); return; }
   const r = await fetch(`/api/config-pull/${pullId}/save-template`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({template_name:name, wlans:wlanData})});
+    body: JSON.stringify({template_name:name, wlans:wlanData,
+                          network: pullData?.networks||{}})});
   const d = await r.json();
   document.getElementById('sv-tpl-res').innerHTML = d.ok
     ? `<span class='ok'>✅ Template <b>${esc(name)}</b> gespeichert (${d.lines} Zeilen) &ndash;
