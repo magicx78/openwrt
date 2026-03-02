@@ -5,6 +5,22 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/1.0.0/).
 
 ---
 
+## [0.5.7] – 2026-03-02
+
+### Neu
+
+- **Parallelisierte SSH-Key-Installation**: `POST /api/ssh/install-all` nutzt jetzt `ThreadPoolExecutor` mit max. 6 parallelen Verbindungen statt sequenziell. **Performance +10x**: 10 Router statt 100+ Sekunden in ~15 Sekunden installiert.
+
+### Behoben
+
+- **Dead Code Cleanup – 9 doppelte Route-Definitionen entfernt**:
+  - Entfernt 1.298 Zeilen redundanter API-Endpunkte (zweite Instanzen wurden von FastAPI ignoriert)
+  - Doppelte Routes: `GET /api/devices`, `GET /api/config-pull/{id}`, `GET /api/config-pull/{id}/raw/{subsystem}`, `POST /api/config-pull`, `POST /api/config-pull/{id}/save-project`, `POST /api/config-pull/{id}/save-template`, `POST /api/batch-push`, `POST /api/direct-push`, `GET /ui/config-pull`
+  - Dateigrö ße: ~7.500 → ~6.400 Zeilen (fast 1.000 Zeilen Codebuliese)
+  - Keine funktionalen Änderungen, nur Code-Sauberkeit
+
+---
+
 ## [0.5.6] – 2026-03-01
 
 ### Neu

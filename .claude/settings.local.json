@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export GITHUB_TOKEN=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)",
+      "Bash(gh auth status)",
+      "Bash(curl -s -H \"Authorization: token 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\" https://api.github.com/user)",
+      "Bash(curl -s -H \"Authorization: token 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\" https://api.github.com/user/repos?per_page=100)",
+      "Bash(python3 -c \"import json,sys; repos=json.load\\(sys.stdin\\); [print\\(f\"\"- {r[''name'']} \\({r[''visibility'']}\\) - {r[''html_url'']}\"\"\\) for r in repos]\")",
+      "Bash(curl -s -H \"Authorization: token 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\" \"https://api.github.com/repos/magicx78/openwrt/contents/\")",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(f\"\"{d[''type'']:6} {d[''name'']}\"\"\\) for d in data] if isinstance\\(data, list\\) else print\\(data.get\\(''message'',''?''\\)\\)\")",
+      "Bash(python3:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git init)",
+      "Bash(git remote add origin https://github.com/magicx78/openwrt.git)",
+      "Bash(git add server.py requirements.txt CHANGELOG.md CONTINUE_PROMPT.md DEPLOY.md STATUS.md .gitignore)",
+      "Bash(git branch -M main)",
+      "Bash(git push -u origin main)",
+      "Bash(git pull origin main --allow-unrelated-histories)",
+      "Bash(git checkout --ours server.py CHANGELOG.md CONTINUE_PROMPT.md)",
+      "Bash(git add server.py CHANGELOG.md CONTINUE_PROMPT.md)",
+      "Bash(git commit:*)",
+      "Bash(git push origin main)",
+      "Bash(python -m py_compile server.py)",
+      "Bash(„provision script not found\", weil 99-provision.sh als statische:*)",
+      "Bash(git add server.py)",
+      "Bash(git add STATUS.md CONTINUE_PROMPT.md)",
+      "Bash(python -c \":*)",
+      "Bash(/c/Users/hellp/Downloads/filesV3/.gitignore:*)",
+      "Bash(/c/Users/hellp/Downloads/filesV3/requirements.txt:*)",
+      "Bash(git add README.md TODO.md .gitignore requirements.txt)",
+      "Bash(git checkout server.py)",
+      "Bash(git add -A)"
+    ]
+  }
+}
