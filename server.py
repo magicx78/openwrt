@@ -2088,6 +2088,7 @@ pre{{background:#161b22;padding:1em;border-radius:6px;overflow-x:auto;border:1px
   {_nav("/ui/uci-generator","⚙️","UCI-Gen")}
   {_nav("/ui/setup","🚀","Setup")}
   {_nav("/ui/debug","🔧","Debug")}
+  {_nav("/ui/topology","🌐","Topologie")}
 </nav>
 {content}
 </body></html>""")
@@ -6048,6 +6049,94 @@ def api_debug_status(db: sqlite3.Connection = Depends(get_db),
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# API: Netzwerk-Topologie  –  Graph-Daten für vis-network Visualisierung (v0.5.8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/topology")
+def api_topology(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
+    """Netzwerk-Topologie als Knoten-Kanten-Graph für vis-network Visualisierung."""
+    # 1. Alle Devices laden, sortiert nach Projekt + Rolle (ap1 first)
+    devices = db.execute("""
+        SELECT base_mac, hostname, role, project, status, last_ip,
+               board_name, model, claimed, last_seen
+        FROM devices
+        ORDER BY project, CASE role WHEN 'ap1' THEN 0 ELSE 1 END, hostname
+    """).fetchall()
+
+    # 2. Devices → Knoten konvertieren
+    nodes = []
+    device_by_mac = {}
+
+    for d in devices:
+        # Type-Mapping: role → GUI-Typ für vis-network
+        if d['role'] == 'ap1':
+            node_type = 'router'
+            color = '#4fc3f7'  # Blau
+        elif d['role'] in ('node', 'repeater'):
+            node_type = 'ap'
+            color = '#81c784'  # Grün
+        else:
+            node_type = 'client'
+            color = '#e0e0e0'  # Grau
+
+        # Status → Rahmenfarbe (grün=provisioned, gelb=pending, rot=error)
+        status_map = {
+            'provisioned': '#10b981',  # Grün
+            'pending': '#f59e0b',      # Gelb/Orange
+            'error': '#ef4444',        # Rot
+            'FAILED': '#ef4444'        # Rot
+        }
+        border_color = status_map.get(d['status'], '#9ca3af')  # Grau default
+
+        # Knoten-Definition für vis-network
+        node = {
+            'id': d['base_mac'],
+            'label': d['hostname'] or d['base_mac'][:12],
+            'type': node_type,
+            'title': f"{d['hostname'] or 'Unbekannt'}\nIP: {d['last_ip'] or '-'}\n{d['board_name'] or 'Unknown'}",
+            'role': d['role'],
+            'project': d['project'],
+            'status': d['status'],
+            'ip': d['last_ip'],
+            'version': d['board_name'],  # Mock: board_name als version
+            'color': color,
+            'borderColor': border_color,
+            'borderWidth': 2
+        }
+        nodes.append(node)
+        device_by_mac[d['base_mac']] = d
+
+    # 3. Edges: ap1 → nodes/repeaters im gleichen Projekt
+    edges = []
+    for d in devices:
+        if d['role'] == 'ap1':
+            # Master AP: verbinde mit allen nodes/repeaters im gleichen Projekt
+            for other in devices:
+                if other['project'] == d['project'] and \
+                   other['role'] in ('node', 'repeater') and \
+                   other['base_mac'] != d['base_mac']:
+                    edges.append({
+                        'id': f"{d['base_mac']}--{other['base_mac']}",
+                        'from': d['base_mac'],
+                        'to': other['base_mac'],
+                        'arrows': 'to',
+                        'width': 2,
+                        'color': '#555'
+                    })
+
+    # 4. Projekte extrahieren
+    projects = sorted(set(d['project'] for d in devices if d['project']))
+
+    return {
+        'devices': nodes,  # Kompatibilität mit vis-network Template (devices key)
+        'nodes': nodes,    # Auch nodes key für template
+        'edges': edges,
+        'projects': projects,
+        'timestamp': now_utc().isoformat()
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # API: UCI Generator  –  Client-Binding & OpenWrt Config Generator (v0.6.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -6224,6 +6313,195 @@ updateStatus();
 setInterval(updateStatus, 2000);
 </script>"""
     return _page(content, "Debug", "/ui/debug")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: Netzwerk-Topologie  –  Interaktiver Graph mit vis-network (v0.5.8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/ui/topology", response_class=HTMLResponse)
+def ui_topology(_=Depends(check_admin)):
+    """Netzwerk-Topologie Visualisierung: Interaktiver Graph mit vis-network."""
+    content = r"""
+<style>
+html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #eee; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+#app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: auto 1fr; grid-template-areas: "header header" "graph sidebar"; height: 100%; }
+header { grid-area: header; padding: 8px 12px; background: #181818; border-bottom: 1px solid #333; display: flex; align-items: center; justify-content: space-between; }
+header .title { font-size: 14px; font-weight: 600; }
+header .controls { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+header select, header button { background: #222; color: #eee; border: 1px solid #444; padding: 3px 6px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+#graph { grid-area: graph; position: relative; }
+#mynetwork { width: 100%; height: 100%; background: #111; }
+#sidebar { grid-area: sidebar; border-left: 1px solid #333; background: #141414; padding: 8px; font-size: 12px; overflow-y: auto; }
+#sidebar h2 { font-size: 13px; margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid #333; }
+#sidebar .kv { margin-bottom: 4px; }
+#sidebar .kv span.key { display: inline-block; width: 90px; color: #999; }
+.legend { margin-top: 12px; border-top: 1px solid #333; padding-top: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+.dot-router { background: #4fc3f7; }
+.dot-ap { background: #81c784; }
+.dot-client { background: #e0e0e0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/vis-network/dist/vis-network.min.js"></script>
+
+<div id="app">
+  <header>
+    <div class="title">🌐 OpenWrt Netzwerk-Topologie</div>
+    <div class="controls">
+      <label for="filterSelect">Filter:</label>
+      <select id="filterSelect">
+        <option value="all">Alle</option>
+        <option value="infra">Nur Infrastruktur</option>
+        <option value="clients">Nur Clients</option>
+      </select>
+      <button id="refreshBtn">Jetzt aktualisieren</button>
+      <span id="statusText">Status: initialisiere…</span>
+    </div>
+  </header>
+  <div id="graph">
+    <div id="mynetwork"></div>
+  </div>
+  <aside id="sidebar">
+    <h2>Details</h2>
+    <div id="detailsContent">Knoten auswählen, um Details zu sehen.</div>
+    <div class="legend">
+      <strong>Legende</strong>
+      <div class="legend-item"><span class="legend-dot dot-router"></span> Router</div>
+      <div class="legend-item"><span class="legend-dot dot-ap"></span> Access Point</div>
+      <div class="legend-item"><span class="legend-dot dot-client"></span> Client</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+  const API_URL = "/api/topology";
+  const CURRENT_VERSION = "N/A";
+  const REFRESH_INTERVAL_MS = 5000;
+
+  const container = document.getElementById("mynetwork");
+  const statusText = document.getElementById("statusText");
+  const filterSelect = document.getElementById("filterSelect");
+  const refreshBtn = document.getElementById("refreshBtn");
+  const detailsContent = document.getElementById("detailsContent");
+
+  const nodes = new vis.DataSet([]);
+  const edges = new vis.DataSet([]);
+  const data = { nodes, edges };
+
+  const options = {
+    autoResize: true,
+    physics: { enabled: false, stabilization: { iterations: 150 } },
+    interaction: { hover: true, multiselect: false, dragNodes: true, zoomView: true, dragView: true },
+    nodes: { font: { color: "#fff", size: 11 }, borderWidth: 1, color: { border: "#555", background: "#222", highlight: { border: "#fff", background: "#333" } } },
+    edges: { color: { color: "#555", highlight: "#fff" }, smooth: true }
+  };
+
+  const network = new vis.Network(container, data, options);
+
+  function getNodeStyle(device) {
+    let colorBg = "#888", shape = "dot", size = 15;
+    if (device.type === "router") { colorBg = "#4fc3f7"; shape = "ellipse"; size = 24; }
+    else if (device.type === "ap") { colorBg = "#81c784"; shape = "dot"; size = 20; }
+    else if (device.type === "client") { colorBg = "#e0e0e0"; shape = "dot"; size = 10; }
+    let borderColor = "#555";
+    if (device.status === "error" || device.status === "FAILED") { borderColor = "#ef4444"; }
+    else if (device.status === "pending") { borderColor = "#f59e0b"; }
+    else if (device.status === "provisioned") { borderColor = "#10b981"; }
+    return { color: { background: colorBg, border: borderColor, highlight: { background: colorBg, border: "#fff" } }, shape, size };
+  }
+
+  function deviceToNode(device) {
+    const style = getNodeStyle(device);
+    return { id: device.id, label: device.label || device.id, title: device.title, ...style, _type: device.type };
+  }
+
+  function buildDetailsHtml(device, allDevices) {
+    const lines = [];
+    function kv(key, value) {
+      if (value === undefined || value === null || value === "") return;
+      lines.push(`<div class="kv"><span class="key">${key}:</span><span>${value}</span></div>`);
+    }
+    kv("ID", device.id);
+    kv("Hostname", device.label);
+    kv("IP", device.ip || "");
+    kv("Typ", device.type);
+    kv("Rolle", device.role);
+    kv("Projekt", device.project);
+    kv("Status", device.status);
+    kv("Version", device.version || "unknown");
+    if (device.type !== "client") {
+      const clients = allDevices.filter(d => d._type === "client" && d.project === device.project);
+      if (clients.length > 0) lines.push(`<div class="kv"><span class="key">Geräte:</span><span>${clients.length}</span></div>`);
+    }
+    return lines.join("");
+  }
+
+  let currentDevices = {};
+
+  async function fetchTopology() {
+    try {
+      statusText.textContent = "Status: lade…";
+      const res = await fetch(API_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const json = await res.json();
+      const devices = json.devices || json.nodes || [];
+      const edgesData = json.edges || [];
+      currentDevices = {};
+      devices.forEach(d => currentDevices[d.id] = { ...d, _type: d.type });
+      applyFilterAndRender(edgesData);
+      statusText.textContent = "Status: OK (" + new Date().toLocaleTimeString() + ")";
+    } catch (err) {
+      console.error(err);
+      statusText.textContent = "Status: Fehler beim Laden";
+    }
+  }
+
+  function applyFilterAndRender(edgesData) {
+    const filter = filterSelect.value;
+    const newNodes = [];
+    const visibleIds = new Set();
+    for (const device of Object.values(currentDevices)) {
+      const isInfra = (device.type === "router" || device.type === "ap");
+      const isClient = device.type === "client";
+      if (filter === "infra" && !isInfra) continue;
+      if (filter === "clients" && !isClient) continue;
+      const node = deviceToNode(device);
+      newNodes.push(node);
+      visibleIds.add(device.id);
+    }
+    nodes.clear();
+    nodes.add(newNodes);
+    const newEdges = [];
+    for (const edge of edgesData) {
+      if (visibleIds.has(edge.from) && visibleIds.has(edge.to)) newEdges.push(edge);
+    }
+    edges.clear();
+    edges.add(newEdges);
+  }
+
+  network.on("click", function (params) {
+    if (params.nodes && params.nodes.length > 0) {
+      const device = currentDevices[params.nodes[0]];
+      if (device) detailsContent.innerHTML = buildDetailsHtml(device, Object.values(currentDevices));
+    } else {
+      detailsContent.textContent = "Knoten auswählen, um Details zu sehen.";
+    }
+  });
+
+  filterSelect.addEventListener("change", async () => {
+    const res = await fetch(API_URL, { cache: "no-store" });
+    const json = await res.json();
+    applyFilterAndRender(json.edges || []);
+  });
+
+  refreshBtn.addEventListener("click", fetchTopology);
+
+  fetchTopology();
+  setInterval(fetchTopology, REFRESH_INTERVAL_MS);
+</script>
+"""
+    return _page(content, "Topologie", "/ui/topology")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

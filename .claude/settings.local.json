@@ -29,7 +29,15 @@
       "Bash(/c/Users/hellp/Downloads/filesV3/requirements.txt:*)",
       "Bash(git add README.md TODO.md .gitignore requirements.txt)",
       "Bash(git checkout server.py)",
-      "Bash(git add -A)"
+      "Bash(git add -A)",
+      "Bash(git add server.py CHANGELOG.md)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s http://localhost:8000/api/topology)",
+      "Bash(python -c \"import server\")",
+      "Bash(python -c \"import uvicorn; print\\(''✅ uvicorn installed''\\)\")",
+      "Bash(python -c \"import uvicorn; print\\(''uvicorn OK''\\)\")",
+      "Bash(python -c \"import time; time.sleep\\(1\\); print\\(''waited''\\)\")",
+      "Bash(git add server.py .claude/settings.local.json .claude/launch.json)"
     ]
   }
 }
