@@ -69,6 +69,17 @@ def _log_activity(typ: str, mac: str = "-", msg: str = "") -> None:
         _debug_activity.pop()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WiFi Client Polling (v0.6.1) – Live WiFi-Station Erfassung per SSH
+# ─────────────────────────────────────────────────────────────────────────────
+_wifi_clients: Dict[str, Dict[str, Dict[str, Any]]] = {}
+# Structure: {ap_mac: {client_mac: {signal, bitrate, connected, last_seen}}}
+
+_WIFI_POLLING_ENABLED = True
+_WIFI_POLLING_INTERVAL_SECONDS = 15  # Fetch every 15 seconds
+_WIFI_POLLING_TIMEOUT = 12  # 12-second timeout per AP SSH call
+_WIFI_LAST_UPDATE: Dict[str, str] = {}  # {ap_mac: iso_timestamp}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # UCI Generator System (v0.6.0) – OpenWrt Config Parser & Client-Binding Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1487,7 +1498,11 @@ def build_router_diagnose(ip: str, user: str, password: str) -> List[DiagnoseSec
 # ─────────────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db(); yield
+    init_db()
+    # Start WiFi polling background task (v0.6.1)
+    wifi_polling_thread = threading.Thread(target=_wifi_polling_task, daemon=True)
+    wifi_polling_thread.start()
+    yield
 
 app = FastAPI(title="OpenWrt Provisioning Server", lifespan=lifespan)
 
@@ -4601,6 +4616,123 @@ def _extract_networks(parsed: Dict) -> Dict[str, Dict]:
     return ifaces
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WiFi Client Parsing (v0.6.1) – Parse SSH output from iwinfo / iw commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_iwinfo_output(output: str) -> Dict[str, Dict[str, Any]]:
+    """Parse iwinfo assoclist output → {client_mac: {signal, bitrate, connected, last_seen}}"""
+    clients: Dict[str, Dict[str, Any]] = {}
+    # Example output:
+    # aa:bb:cc:dd:ee:01	0 dBm / 0 Mbit/s	0 ms ago
+    for line in output.splitlines():
+        if ':' not in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 1 and ':' in parts[0]:
+            mac = parts[0].lower()
+            # Extract signal (dBm) and bitrate if present
+            signal = -60  # Default
+            bitrate = 0
+            for i, part in enumerate(parts):
+                if 'dBm' in part and i > 0:
+                    try:
+                        signal = int(parts[i-1])
+                    except (ValueError, IndexError):
+                        pass
+                if 'Mbit/s' in part and i > 0:
+                    try:
+                        bitrate = int(parts[i-1])
+                    except (ValueError, IndexError):
+                        pass
+            clients[mac] = {
+                'signal': signal,
+                'bitrate': bitrate,
+                'connected': True,
+                'last_seen': now_utc().isoformat()
+            }
+    return clients
+
+
+def _parse_iw_station_output(output: str) -> Dict[str, Dict[str, Any]]:
+    """Parse 'iw dev wlan0 station dump' → {client_mac: {signal, bitrate, connected, last_seen}}"""
+    clients: Dict[str, Dict[str, Any]] = {}
+    current_mac: Optional[str] = None
+    for line in output.splitlines():
+        if line.startswith('Station '):
+            # "Station aa:bb:cc:dd:ee:01 (on wlan0)"
+            parts = line.split()
+            if len(parts) > 1:
+                current_mac = parts[1].lower()
+                clients[current_mac] = {
+                    'signal': -60,
+                    'bitrate': 0,
+                    'connected': True,
+                    'last_seen': now_utc().isoformat()
+                }
+        elif current_mac and 'signal' in line:
+            # "signal: -45 dBm"
+            try:
+                if '[' in line and ']' in line:
+                    signal = int(line.split('[')[1].split(']')[0])
+                    clients[current_mac]['signal'] = signal
+            except (ValueError, IndexError):
+                pass
+        elif current_mac and 'bitrate' in line and 'Mbit' in line:
+            # "tx bitrate: 390 MBit/s"
+            try:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == 'MBit/s' and i > 0:
+                        clients[current_mac]['bitrate'] = int(parts[i-1])
+                        break
+            except (ValueError, IndexError):
+                pass
+    return clients
+
+
+def _poll_wifi_clients_from_ap(ap_mac: str, ap_ip: str, user: str,
+                                password: str, key_content: Optional[str] = None,
+                                logline=None) -> Optional[Dict[str, Dict[str, Any]]]:
+    """SSH zu AP → iwinfo/iw assoclist → {client_mac: {signal, bitrate, ...}}"""
+    if not logline:
+        logline = lambda m: None
+
+    try:
+        base_ssh = _build_base_ssh(ap_ip, user, password,
+                                  f"WiFi-Poll {ap_ip}", key_content)
+
+        # Try iwinfo first (lighter than iw station dump)
+        rc, stdout, stderr = _ssh_exec(base_ssh,
+            "iwinfo wlan0 assoclist 2>/dev/null || iwinfo | grep -A 20 'Associated'",
+            timeout=_WIFI_POLLING_TIMEOUT)
+
+        if rc == 0 and stdout and 'Station' not in stdout and len(stdout) > 10:
+            clients = _parse_iwinfo_output(stdout)
+            if clients:
+                logline(f"[WiFi] {ap_ip}: {len(clients)} Clients (iwinfo)")
+                return clients
+
+        # Fallback to iw if iwinfo not available
+        rc, stdout, stderr = _ssh_exec(base_ssh, "iw dev wlan0 station dump",
+                                       timeout=_WIFI_POLLING_TIMEOUT)
+        if rc == 0 and stdout and 'Station' in stdout:
+            clients = _parse_iw_station_output(stdout)
+            if clients:
+                logline(f"[WiFi] {ap_ip}: {len(clients)} Clients (iw)")
+                return clients
+
+        logline(f"[WiFi] {ap_ip}: No clients found")
+        return {}
+
+    except subprocess.TimeoutExpired:
+        logline(f"[WiFi] {ap_ip}: Timeout – keeping stale data")
+        return None
+    except Exception as e:
+        logline(f"[WiFi] {ap_ip}: Error – {type(e).__name__}: {str(e)[:100]}")
+        return None
+
+
 def _wlans_to_uci_set(wlans: List[Dict]) -> str:
     """WLAN-Dicts → UCI set-Befehle für Direct-Push (uci batch)."""
     lines: List[str] = []
@@ -6049,12 +6181,67 @@ def api_debug_status(db: sqlite3.Connection = Depends(get_db),
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WiFi Client Polling Task (v0.6.1) – Background daemon für Live-Client-Erfassung
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wifi_polling_task():
+    """Background daemon: Poll WiFi clients from all ap1 devices every N seconds."""
+    import time
+    while _WIFI_POLLING_ENABLED:
+        try:
+            db = get_db()
+            # Get all ap1 devices from DB with last known IP
+            aps = db.execute("""
+                SELECT base_mac, last_ip, project FROM devices
+                WHERE role='ap1' AND last_ip IS NOT NULL
+                ORDER BY hostname
+            """).fetchall()
+
+            # Poll each AP
+            for ap in aps:
+                ap_mac = ap['base_mac']
+                ap_ip = ap['last_ip']
+
+                try:
+                    # Get SSH key from DB
+                    key_content = _get_saved_ssh_key()
+
+                    # Poll WiFi clients (use root user, empty password = key auth)
+                    clients = _poll_wifi_clients_from_ap(
+                        ap_mac, ap_ip, "root", "",
+                        key_content=key_content,
+                        logline=lambda m: None)
+
+                    # Update cache if clients were found
+                    if clients is not None:  # None = error, {}= no clients
+                        _wifi_clients[ap_mac] = clients
+                        _WIFI_LAST_UPDATE[ap_mac] = now_utc().isoformat()
+                except Exception as e:
+                    # Keep stale data on error
+                    pass
+
+            # Sleep until next poll cycle
+            time.sleep(_WIFI_POLLING_INTERVAL_SECONDS)
+
+        except Exception as e:
+            # Log but keep running
+            pass
+            time.sleep(_WIFI_POLLING_INTERVAL_SECONDS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # API: Netzwerk-Topologie  –  Graph-Daten für vis-network Visualisierung (v0.5.8)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/topology")
-def api_topology(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin)):
-    """Netzwerk-Topologie als Knoten-Kanten-Graph für vis-network Visualisierung."""
+def api_topology(db: sqlite3.Connection = Depends(get_db),
+                 _=Depends(check_admin),
+                 include_wifi: bool = False):
+    """Netzwerk-Topologie als Knoten-Kanten-Graph für vis-network Visualisierung.
+
+    Query Parameter:
+    - include_wifi: bool (default: False) – Include live WiFi clients in response
+    """
     # 1. Alle Devices laden, sortiert nach Projekt + Rolle (ap1 first)
     devices = db.execute("""
         SELECT base_mac, hostname, role, project, status, last_ip,
@@ -6127,13 +6314,21 @@ def api_topology(db: sqlite3.Connection = Depends(get_db), _=Depends(check_admin
     # 4. Projekte extrahieren
     projects = sorted(set(d['project'] for d in devices if d['project']))
 
-    return {
+    # Response zusammenstellen
+    response = {
         'devices': nodes,  # Kompatibilität mit vis-network Template (devices key)
         'nodes': nodes,    # Auch nodes key für template
         'edges': edges,
         'projects': projects,
         'timestamp': now_utc().isoformat()
     }
+
+    # NEW: Optionally attach live WiFi client data (v0.6.1)
+    if include_wifi:
+        response['wifi_clients'] = _wifi_clients
+        response['wifi_last_update'] = _WIFI_LAST_UPDATE
+
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6354,6 +6549,7 @@ header select, header button { background: #222; color: #eee; border: 1px solid 
         <option value="all">Alle</option>
         <option value="infra">Nur Infrastruktur</option>
         <option value="clients">Nur Clients</option>
+        <option value="with_wifi">Nur APs mit WiFi-Clients</option>
       </select>
       <button id="refreshBtn">Jetzt aktualisieren</button>
       <span id="statusText">Status: initialisiere…</span>
@@ -6375,7 +6571,7 @@ header select, header button { background: #222; color: #eee; border: 1px solid 
 </div>
 
 <script>
-  const API_URL = "/api/topology";
+  const API_URL = "/api/topology?include_wifi=1";  // NEW: request WiFi client data
   const CURRENT_VERSION = "N/A";
   const REFRESH_INTERVAL_MS = 5000;
 
@@ -6434,6 +6630,26 @@ header select, header button { background: #222; color: #eee; border: 1px solid 
       const clients = allDevices.filter(d => d._type === "client" && d.project === device.project);
       if (clients.length > 0) lines.push(`<div class="kv"><span class="key">Geräte:</span><span>${clients.length}</span></div>`);
     }
+    // NEW: Show WiFi Clients if this is an AP (v0.6.1)
+    if (device.type !== "client" && window.wifiClients && window.wifiClients[device.id]) {
+      const wifiClients = window.wifiClients[device.id];
+      const clientCount = Object.keys(wifiClients).length;
+      if (clientCount > 0) {
+        lines.push(`<div class="kv"><span class="key">WiFi Clients:</span><span>${clientCount}</span></div>`);
+        // Show top 5 clients with signal/bitrate
+        let shown = 0;
+        for (const [mac, info] of Object.entries(wifiClients)) {
+          if (shown >= 5) break;
+          const signal = info.signal || -60;
+          const bitrate = info.bitrate || 0;
+          lines.push(`<div class="kv" style="margin-left: 1em; font-size: 11px"><span class="key">${mac}:</span><span>${signal} dBm / ${bitrate} Mbit/s</span></div>`);
+          shown++;
+        }
+        if (clientCount > 5) {
+          lines.push(`<div class="kv" style="margin-left: 1em; font-size: 11px"><span class="key">+${clientCount - 5} more</span></div>`);
+        }
+      }
+    }
     return lines.join("");
   }
 
@@ -6449,6 +6665,8 @@ header select, header button { background: #222; color: #eee; border: 1px solid 
       const edgesData = json.edges || [];
       currentDevices = {};
       devices.forEach(d => currentDevices[d.id] = { ...d, _type: d.type });
+      // NEW: Store WiFi clients data (v0.6.1)
+      window.wifiClients = json.wifi_clients || {};
       applyFilterAndRender(edgesData);
       statusText.textContent = "Status: OK (" + new Date().toLocaleTimeString() + ")";
     } catch (err) {
@@ -6464,8 +6682,11 @@ header select, header button { background: #222; color: #eee; border: 1px solid 
     for (const device of Object.values(currentDevices)) {
       const isInfra = (device.type === "router" || device.type === "ap");
       const isClient = device.type === "client";
+      const hasWifiClients = window.wifiClients && window.wifiClients[device.id] &&
+                             Object.keys(window.wifiClients[device.id]).length > 0;
       if (filter === "infra" && !isInfra) continue;
       if (filter === "clients" && !isClient) continue;
+      if (filter === "with_wifi" && !hasWifiClients) continue;  // NEW: filter for APs with WiFi clients
       const node = deviceToNode(device);
       newNodes.push(node);
       visibleIds.add(device.id);
