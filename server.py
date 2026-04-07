@@ -8,7 +8,7 @@ import asyncio, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, subproces
 from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 try:
     import paramiko as _paramiko
@@ -73,6 +73,9 @@ def _log_activity(typ: str, mac: str = "-", msg: str = "") -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 _wifi_clients: Dict[str, Dict[str, Dict[str, Any]]] = {}
 # Structure: {ap_mac: {client_mac: {signal, bitrate, connected, last_seen}}}
+
+_wifi_iface_status: Dict[str, Dict[str, Any]] = {}
+# Structure: {ap_mac: {iface_name: {rx_bytes, tx_bytes, valid, status, warning}}}
 
 _WIFI_POLLING_ENABLED = True
 _WIFI_POLLING_INTERVAL_SECONDS = 15  # Fetch every 15 seconds
@@ -4600,20 +4603,90 @@ def _extract_radios(parsed: Dict) -> List[Dict]:
     ]
 
 
+def _classify_interface(name: str, proto: str, device: str) -> str:
+    """Derive interface_type from UCI name, proto, and device.
+
+    Returns one of: uplink, lan, lan_port, wifi, vpn, unknown
+    """
+    # WAN uplinks
+    if name in ("wan", "wan6") or proto == "dhcpv6":
+        return "uplink"
+    # VPN / WireGuard
+    if proto == "wireguard" or name.startswith("wg"):
+        return "vpn"
+    # Physical LAN ports named lan1, lan2, lan3 …
+    if re.match(r'^lan\d+$', name):
+        return "lan_port"
+    # WiFi AP virtual interfaces (phy0-ap0, phy1-ap1, …)
+    if device and re.match(r'^phy\d+-ap\d+$', device):
+        return "wifi"
+    # VLAN-bridged LANs (device = br-lan.X)
+    if device and re.match(r'^br-lan\.\d+$', device):
+        return "lan"
+    # Standard LAN bridge or static LAN (lan, iot, …)
+    if proto == "static" and ("br-lan" in device or name in ("lan", "iot")):
+        return "lan"
+    return "unknown"
+
+
 def _extract_networks(parsed: Dict) -> Dict[str, Dict]:
-    """UCI interface-Sektionen → Netz-Dict (für VLAN-Dropdown im Editor)."""
+    """UCI interface-Sektionen → Netz-Dict mit interface_type (für VLAN-Dropdown im Editor)."""
     ifaces: Dict[str, Dict] = {}
     for name, sec in parsed.items():
         if sec.get("_type") != "interface":
             continue
         o, li = sec["_opt"], sec["_list"]
+        proto  = o.get("proto", "")
+        device = o.get("device", "")
         ifaces[name] = {
-            "proto":  o.get("proto", ""),
-            "ipaddr": o.get("ipaddr", ""),
-            "device": o.get("device", ""),
-            "dns":    li.get("dns", []),
+            "proto":          proto,
+            "ipaddr":         o.get("ipaddr", ""),
+            "device":         device,
+            "dns":            li.get("dns", []),
+            "interface_type": _classify_interface(name, proto, device),
         }
     return ifaces
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network Data Validation  (v0.6.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _validate_rx_tx(rx: Optional[int], tx: Optional[int]) -> Tuple[bool, Optional[str]]:
+    """Validate RX/TX byte counters from /proc/net/dev or similar sources.
+
+    Returns (valid, warning) where:
+      (False, "invalid_negative") — counter below zero, data is corrupt
+      (True,  "inactive")         — both counters are zero, interface has no traffic
+      (True,  None)               — normal, counters look healthy
+    """
+    if rx is None or tx is None:
+        return (True, None)  # Missing data = unknown, not invalid
+    if rx < 0 or tx < 0:
+        return (False, "invalid_negative")
+    if rx == 0 and tx == 0:
+        return (True, "inactive")
+    return (True, None)
+
+
+def _parse_proc_net_dev(output: str) -> Dict[str, Dict[str, int]]:
+    """Parse /proc/net/dev output → {iface: {rx_bytes, tx_bytes}}."""
+    result: Dict[str, Dict[str, int]] = {}
+    for line in output.splitlines()[2:]:  # skip two header lines
+        if ':' not in line:
+            continue
+        iface, _, stats = line.partition(':')
+        iface = iface.strip()
+        fields = stats.split()
+        if len(fields) >= 9:
+            try:
+                result[iface] = {
+                    'rx_bytes': int(fields[0]),
+                    'tx_bytes': int(fields[8]),
+                }
+            except (ValueError, IndexError):
+                pass
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4624,16 +4697,16 @@ def _parse_iwinfo_output(output: str) -> Dict[str, Dict[str, Any]]:
     """Parse iwinfo assoclist output → {client_mac: {signal, bitrate, connected, last_seen}}"""
     clients: Dict[str, Dict[str, Any]] = {}
     # Example output:
-    # aa:bb:cc:dd:ee:01	0 dBm / 0 Mbit/s	0 ms ago
+    # aa:bb:cc:dd:ee:01	-65 dBm / 54 Mbit/s	100 ms ago
     for line in output.splitlines():
         if ':' not in line:
             continue
         parts = line.split()
         if len(parts) >= 1 and ':' in parts[0]:
             mac = parts[0].lower()
-            # Extract signal (dBm) and bitrate if present
-            signal = -60  # Default
-            bitrate = 0
+            # Start with None — only set when parsing actually succeeds (Fix B)
+            signal: Optional[int] = None
+            bitrate: Optional[int] = None
             for i, part in enumerate(parts):
                 if 'dBm' in part and i > 0:
                     try:
@@ -4655,18 +4728,19 @@ def _parse_iwinfo_output(output: str) -> Dict[str, Dict[str, Any]]:
 
 
 def _parse_iw_station_output(output: str) -> Dict[str, Dict[str, Any]]:
-    """Parse 'iw dev wlan0 station dump' → {client_mac: {signal, bitrate, connected, last_seen}}"""
+    """Parse 'iw dev <iface> station dump' → {client_mac: {signal, bitrate, connected, last_seen}}"""
     clients: Dict[str, Dict[str, Any]] = {}
     current_mac: Optional[str] = None
     for line in output.splitlines():
         if line.startswith('Station '):
-            # "Station aa:bb:cc:dd:ee:01 (on wlan0)"
+            # "Station aa:bb:cc:dd:ee:01 (on phy0-ap0)"
             parts = line.split()
             if len(parts) > 1:
                 current_mac = parts[1].lower()
+                # Start with None — only set when parsing actually succeeds (Fix B)
                 clients[current_mac] = {
-                    'signal': -60,
-                    'bitrate': 0,
+                    'signal': None,
+                    'bitrate': None,
                     'connected': True,
                     'last_seen': now_utc().isoformat()
                 }
@@ -4691,36 +4765,135 @@ def _parse_iw_station_output(output: str) -> Dict[str, Dict[str, Any]]:
     return clients
 
 
-def _poll_wifi_clients_from_ap(ap_mac: str, ap_ip: str, user: str,
-                                password: str, key_content: Optional[str] = None,
-                                logline=None) -> Optional[Dict[str, Dict[str, Any]]]:
-    """SSH zu AP → iwinfo/iw assoclist → {client_mac: {signal, bitrate, ...}}"""
+def _poll_wifi_clients_from_ap(
+    ap_mac: str,
+    ap_ip: str,
+    user: str,
+    password: str,
+    key_content: Optional[str] = None,
+    logline=None,
+    iface_stats_out: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """SSH to AP → discover WiFi interfaces dynamically → poll assoclist per interface.
+
+    Fix A: replaces hardcoded wlan0 with dynamic discovery via 'iw dev'.
+    Fix E: populates iface_stats_out with {iface: {rx_bytes, tx_bytes, valid, status, warning}}
+           when the caller passes a dict — lets callers decide how to surface inactive interfaces.
+
+    Returns:
+        {client_mac: {signal, bitrate, connected, last_seen}}  on success
+        {}   when connected but no clients found
+        None when SSH failed (caller should keep stale data)
+    """
     if not logline:
-        logline = lambda m: None
+        logline = lambda m: None  # noqa: E731
 
     try:
         base_ssh = _build_base_ssh(ap_ip, user, password,
-                                  f"WiFi-Poll {ap_ip}", key_content)
+                                   f"WiFi-Poll {ap_ip}", key_content)
 
-        # Try iwinfo first (lighter than iw station dump)
-        rc, stdout, stderr = _ssh_exec(base_ssh,
-            "iwinfo wlan0 assoclist 2>/dev/null || iwinfo | grep -A 20 'Associated'",
+        # ── Fix A: Discover WiFi interfaces via 'iw dev' ──────────────────────
+        rc, iface_out, _ = _ssh_exec(
+            base_ssh,
+            "iw dev 2>/dev/null | awk '/Interface/{print $2}'",
             timeout=_WIFI_POLLING_TIMEOUT)
 
-        if rc == 0 and stdout and 'Station' not in stdout and len(stdout) > 10:
-            clients = _parse_iwinfo_output(stdout)
-            if clients:
-                logline(f"[WiFi] {ap_ip}: {len(clients)} Clients (iwinfo)")
-                return clients
+        interfaces: List[str] = (
+            [l.strip() for l in iface_out.splitlines() if l.strip()]
+            if rc == 0 and iface_out.strip()
+            else []
+        )
+        if not interfaces:
+            logline(f"[WiFi] {ap_ip}: No WiFi interfaces found via iw dev")
+            return {}
 
-        # Fallback to iw if iwinfo not available
-        rc, stdout, stderr = _ssh_exec(base_ssh, "iw dev wlan0 station dump",
-                                       timeout=_WIFI_POLLING_TIMEOUT)
+        logline(f"[WiFi] {ap_ip}: Interfaces: {', '.join(interfaces)}")
+
+        # ── Fix E: Read /proc/net/dev for interface activity ──────────────────
+        if iface_stats_out is not None:
+            rc_dev, dev_out, _ = _ssh_exec(
+                base_ssh, "cat /proc/net/dev 2>/dev/null",
+                timeout=_WIFI_POLLING_TIMEOUT)
+            proc_stats = _parse_proc_net_dev(dev_out) if rc_dev == 0 else {}
+            for iface in interfaces:
+                s = proc_stats.get(iface, {})
+                rx = s.get('rx_bytes')
+                tx = s.get('tx_bytes')
+                valid, warning = _validate_rx_tx(rx, tx)
+                iface_stats_out[iface] = {
+                    'rx_bytes': rx,
+                    'tx_bytes': tx,
+                    'valid':    valid,
+                    'status':   warning if warning else 'active',
+                    'warning':  warning,
+                }
+
+        # ── Poll all interfaces: iwinfo first, iw fallback ────────────────────
+        # Build a single compound shell command to avoid N round-trips.
+        _SEP = "__WIFIFACE__"
+        iwinfo_cmd = " ; ".join(
+            f"echo '{_SEP}{iface}'; iwinfo {iface} assoclist 2>/dev/null"
+            for iface in interfaces
+        )
+        rc, stdout, _ = _ssh_exec(base_ssh, iwinfo_cmd,
+                                  timeout=_WIFI_POLLING_TIMEOUT)
+
+        all_clients: Dict[str, Dict[str, Any]] = {}
+
+        if rc == 0 and stdout:
+            current_lines: List[str] = []
+            current_iface: Optional[str] = None
+            for line in stdout.splitlines():
+                if line.startswith(_SEP):
+                    if current_iface and current_lines:
+                        c = _parse_iwinfo_output("\n".join(current_lines))
+                        if c:
+                            all_clients.update(c)
+                            logline(f"[WiFi] {ap_ip}/{current_iface}: {len(c)} (iwinfo)")
+                    current_iface = line[len(_SEP):]
+                    current_lines = []
+                else:
+                    current_lines.append(line)
+            # flush last section
+            if current_iface and current_lines:
+                c = _parse_iwinfo_output("\n".join(current_lines))
+                if c:
+                    all_clients.update(c)
+                    logline(f"[WiFi] {ap_ip}/{current_iface}: {len(c)} (iwinfo)")
+
+        if all_clients:
+            return all_clients
+
+        # ── Fallback: iw dev <iface> station dump ─────────────────────────────
+        iw_cmd = " ; ".join(
+            f"echo '{_SEP}{iface}'; iw dev {iface} station dump 2>/dev/null"
+            for iface in interfaces
+        )
+        rc, stdout, _ = _ssh_exec(base_ssh, iw_cmd,
+                                  timeout=_WIFI_POLLING_TIMEOUT)
+
         if rc == 0 and stdout and 'Station' in stdout:
-            clients = _parse_iw_station_output(stdout)
-            if clients:
-                logline(f"[WiFi] {ap_ip}: {len(clients)} Clients (iw)")
-                return clients
+            current_lines = []
+            current_iface = None
+            for line in stdout.splitlines():
+                if line.startswith(_SEP):
+                    if current_iface and current_lines:
+                        c = _parse_iw_station_output("\n".join(current_lines))
+                        if c:
+                            all_clients.update(c)
+                            logline(f"[WiFi] {ap_ip}/{current_iface}: {len(c)} (iw)")
+                    current_iface = line[len(_SEP):]
+                    current_lines = []
+                else:
+                    current_lines.append(line)
+            if current_iface and current_lines:
+                c = _parse_iw_station_output("\n".join(current_lines))
+                if c:
+                    all_clients.update(c)
+                    logline(f"[WiFi] {ap_ip}/{current_iface}: {len(c)} (iw)")
+
+        if all_clients:
+            return all_clients
 
         logline(f"[WiFi] {ap_ip}: No clients found")
         return {}
@@ -6206,16 +6379,25 @@ def _wifi_polling_task():
                     # Get SSH key from DB
                     key_content = _get_saved_ssh_key()
 
+                    # Fix E: collect interface activity stats alongside clients
+                    iface_stats: Dict[str, Any] = {}
+
                     # Poll WiFi clients (use root user, empty password = key auth)
                     clients = _poll_wifi_clients_from_ap(
                         ap_mac, ap_ip, "root", "",
                         key_content=key_content,
-                        logline=lambda m: None)
+                        logline=lambda m: None,
+                        iface_stats_out=iface_stats)
 
                     # Update cache if clients were found
                     if clients is not None:  # None = error, {}= no clients
                         _wifi_clients[ap_mac] = clients
                         _WIFI_LAST_UPDATE[ap_mac] = now_utc().isoformat()
+
+                    # Store interface activity status (Fix E)
+                    if iface_stats:
+                        _wifi_iface_status[ap_mac] = iface_stats
+
                 except Exception as e:
                     # Keep stale data on error
                     pass
@@ -6323,10 +6505,12 @@ def api_topology(db: sqlite3.Connection = Depends(get_db),
         'timestamp': now_utc().isoformat()
     }
 
-    # NEW: Optionally attach live WiFi client data (v0.6.1)
+    # Optionally attach live WiFi client data + interface activity (v0.6.2)
     if include_wifi:
         response['wifi_clients'] = _wifi_clients
         response['wifi_last_update'] = _WIFI_LAST_UPDATE
+        # Fix E: interface activity status — {ap_mac: {iface: {status, rx_bytes, tx_bytes, …}}}
+        response['wifi_iface_status'] = _wifi_iface_status
 
     return response
 

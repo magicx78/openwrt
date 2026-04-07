@@ -1,4 +1,4 @@
-# 🛜 OpenWrt Provisioning Server v0.5.6
+# 🛜 OpenWrt Provisioning Server v0.6.2
 
 **Automatisierte Massenbereitstellung (Mass Provisioning) für OpenWrt Router-Netzwerke**
 
@@ -16,7 +16,20 @@ Hauptrouter (Config pullen)
 
 ---
 
-## ⚡ Features v0.5.6
+## ⚡ Features v0.6.2
+
+### 🆕 Neu in v0.6.2 — Datenqualität & Interface-Klassifizierung
+- **WiFi Interface Discovery**: Dynamische `iw dev`-Erkennung statt hardcoded `wlan0` — unterstützt `phy0-ap0`, `phy1-ap0` etc.
+- **Interface-Typ-Klassifizierung**: Jedes UCI-Interface bekommt `interface_type` (`uplink`, `lan`, `lan_port`, `wifi`, `vpn`, `unknown`)
+- **RX/TX-Validierung**: Zentrale `_validate_rx_tx()` — markiert `inactive` (0/0), `invalid_negative` (<0), oder `active`
+- **Signal/Bitrate als `null`**: Keine Phantomwerte mehr — fehlende Werte sind `null`, nicht `-60 dBm`
+- **Interface-Activity-Status**: `wifi_iface_status` im Topology-API — per Interface `{rx_bytes, tx_bytes, status, warning}`
+- **`GET /api/topology?include_wifi=1`**: Liefert jetzt `wifi_iface_status` neben `wifi_clients`
+
+### 🆕 Neu in v0.6.1 — Live WiFi Client Tracking
+- **SSH WiFi Polling**: Hintergrund-Daemon liest Clients von AP1-Geräten (iwinfo/iw)
+- **Topology API**: `include_wifi=1` fügt Live-Clients der Topologie-Antwort hinzu
+- **Stale-Data-Logik**: Bei SSH-Fehler: letzte bekannte Daten behalten, kein Crash
 
 ### 🎯 Kernsystem
 - **Bootstrap-Skript**: Vollständig deterministisch, fail-fast, 100% lokal auf Router
@@ -70,7 +83,7 @@ curl -X POST http://admin:changeme@localhost:8000/api/ssh/generate-keypair
 
 ## 📊 Architektur
 
-- **server.py** (~6600 Zeilen): FastAPI + SQLite
+- **server.py** (~6950 Zeilen): FastAPI + SQLite
 - **bootstrap-script** (`99-provision.sh`): Router-seitig, 100% lokal
 - **Template-Engine**: UCI-Batch mit `{{VAR}}`-Ersetzung
 - **SSH-Deployment**: Paramiko-basiert, Windows-compatible
