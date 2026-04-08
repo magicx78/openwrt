@@ -20,6 +20,9 @@ from .const import (
     SNAPSHOT_ENDPOINT,
 )
 
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD = "admin"
+
 
 class OpenWrtTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Manage OpenWrt topology polling."""
@@ -48,8 +51,8 @@ class OpenWrtTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch latest snapshot."""
         url = f"{self.base_url}{SNAPSHOT_ENDPOINT}"
         auth = None
-        username = self.entry.data.get("username")
-        password = self.entry.data.get("password")
+        username = self.entry.data.get("username") or DEFAULT_USERNAME
+        password = self.entry.data.get("password") or DEFAULT_PASSWORD
         if username:
             auth = aiohttp.BasicAuth(str(username), str(password or ""))
 

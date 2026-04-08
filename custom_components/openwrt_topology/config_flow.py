@@ -22,6 +22,9 @@ from .const import (
     SNAPSHOT_ENDPOINT,
 )
 
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD = "admin"
+
 
 class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle OpenWrt topology config flow."""
@@ -43,8 +46,8 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data={
                         CONF_NAME: user_input.get(CONF_NAME) or DEFAULT_NAME,
                         CONF_BASE_URL: base_url,
-                        CONF_USERNAME: user_input.get(CONF_USERNAME),
-                        CONF_PASSWORD: user_input.get(CONF_PASSWORD),
+                        CONF_USERNAME: user_input.get(CONF_USERNAME) or DEFAULT_USERNAME,
+                        CONF_PASSWORD: user_input.get(CONF_PASSWORD) or DEFAULT_PASSWORD,
                         CONF_VERIFY_SSL: bool(user_input.get(CONF_VERIFY_SSL, True)),
                         CONF_SCAN_INTERVAL: max(MIN_SCAN_INTERVAL, int(user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))),
                     },
@@ -55,8 +58,8 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_NAME, default=DEFAULT_NAME): str,
                 vol.Required(CONF_BASE_URL): str,
-                vol.Optional(CONF_USERNAME): str,
-                vol.Optional(CONF_PASSWORD): str,
+                vol.Optional(CONF_USERNAME, default=DEFAULT_USERNAME): str,
+                vol.Optional(CONF_PASSWORD, default=DEFAULT_PASSWORD): str,
                 vol.Optional(CONF_VERIFY_SSL, default=True): bool,
                 vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
             }
@@ -69,8 +72,8 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         verify_ssl = bool(user_input.get(CONF_VERIFY_SSL, True))
 
         auth = None
-        username = user_input.get(CONF_USERNAME)
-        password = user_input.get(CONF_PASSWORD)
+        username = user_input.get(CONF_USERNAME) or DEFAULT_USERNAME
+        password = user_input.get(CONF_PASSWORD) or DEFAULT_PASSWORD
         if username:
             auth = aiohttp.BasicAuth(str(username), str(password or ""))
 
