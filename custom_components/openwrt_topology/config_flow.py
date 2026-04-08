@@ -10,7 +10,6 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_BASE_URL,
@@ -68,7 +67,6 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _validate_connection(self, user_input: dict[str, Any]) -> tuple[bool, str]:
         base_url = str(user_input[CONF_BASE_URL]).rstrip("/")
         verify_ssl = bool(user_input.get(CONF_VERIFY_SSL, True))
-        session = async_get_clientsession(self.hass, verify_ssl=verify_ssl)
 
         auth = None
         username = user_input.get(CONF_USERNAME)
@@ -77,17 +75,20 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             auth = aiohttp.BasicAuth(str(username), str(password or ""))
 
         try:
-            async with asyncio.timeout(15):
-                response = await session.get(
-                    f"{base_url}{SNAPSHOT_ENDPOINT}",
-                    auth=auth,
-                    headers={"Accept": "application/json"},
-                )
-                if response.status >= 400:
-                    return False, "cannot_connect"
-                payload = await response.json(content_type=None)
-                if not isinstance(payload, dict) or "nodes" not in payload:
-                    return False, "invalid_response"
+            connector = aiohttp.TCPConnector(ssl=verify_ssl)
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                async with asyncio.timeout(15):
+                    response = await session.get(
+                        f"{base_url}{SNAPSHOT_ENDPOINT}",
+                        auth=auth,
+                        headers={"Accept": "application/json"},
+                    )
+                    if response.status >= 400:
+                        return False, "cannot_connect"
+                    payload = await response.json(content_type=None)
+                    if not isinstance(payload, dict) or "nodes" not in payload:
+                        return False, "invalid_response"
         except TimeoutError:
             return False, "timeout"
         except aiohttp.ClientError:

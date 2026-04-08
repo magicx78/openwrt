@@ -41,6 +41,7 @@ class OpenWrtTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             logger=logging.getLogger(__name__),
             name=f"{DOMAIN}_{entry.entry_id}",
             update_interval=update_interval,
+            config_entry=entry,
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
