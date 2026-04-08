@@ -73,7 +73,7 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
 
     hass.http.register_view(OpenWrtTopologySnapshotView())
 
-    async_register_panel(
+    await async_register_panel(
         hass,
         frontend_url_path="openwrt-topology",
         webcomponent_name="openwrt-topology-panel",
