@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Topology</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #0f1318; color: #e6edf3; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+    #app { display: grid; grid-template-columns: 1fr 360px; grid-template-rows: auto auto 1fr auto; grid-template-areas: "head head" "filters filters" "graph side" "foot foot"; height: 100%; }
+    header { grid-area: head; padding: 10px 14px; border-bottom: 1px solid #2a323c; background: #151b23; display: flex; justify-content: space-between; align-items: center; }
+    header .title { font-size: 14px; font-weight: 600; }
+    #status { color: #9fb0c3; font-size: 12px; }
+    #filters { grid-area: filters; display: flex; flex-wrap: wrap; gap: 14px; padding: 8px 14px; border-bottom: 1px solid #2a323c; background: #111820; font-size: 12px; }
+    #graphWrap { grid-area: graph; position: relative; }
+    #graph { width: 100%; height: 100%; }
+    #loading, #error { position: absolute; top: 12px; left: 12px; z-index: 5; background: #1f2937; border: 1px solid #374151; border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+    #error { display: none; color: #fecaca; border-color: #7f1d1d; background: #2a0f13; }
+    #sidebar { grid-area: side; border-left: 1px solid #2a323c; background: #121a23; padding: 10px; overflow: auto; font-size: 12px; }
+    #sidebar h2 { margin: 0 0 8px; font-size: 13px; }
+    .kv { margin-bottom: 5px; }
+    .kv .k { color: #9fb0c3; display: inline-block; min-width: 130px; }
+    .unknown { color: #94a3b8; }
+    .warn { color: #fca5a5; }
+    .legend { margin-top: 12px; border-top: 1px solid #2a323c; padding-top: 8px; }
+    .legend ul { margin: 6px 0 0; padding-left: 16px; }
+    footer { grid-area: foot; border-top: 1px solid #2a323c; padding: 8px 14px; font-size: 11px; color: #9fb0c3; background: #111820; }
+    @media (max-width: 980px) {
+      #app { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(320px, 45vh) 1fr auto; grid-template-areas: "head" "filters" "graph" "side" "foot"; }
+      #sidebar { border-left: none; border-top: 1px solid #2a323c; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="title">Topology Snapshot Visualisierung</div>
+      <div id="status">Lade Snapshot...</div>
+    </header>
+
+    <div id="filters">
+      <label><input type="checkbox" id="filterHideInactive" /> inactive ausblenden</label>
+      <label><input type="checkbox" id="filterHighlightInferred" /> inferred hervorheben</label>
+      <label><input type="checkbox" id="filterClientsWithSignal" /> nur Clients mit Signal anzeigen</label>
+    </div>
+
+    <section id="graphWrap">
+      <div id="loading">Lade Daten...</div>
+      <div id="error"></div>
+      <div id="graph"></div>
+    </section>
+
+    <aside id="sidebar">
+      <h2>Details</h2>
+      <div id="detailContent">Knoten anklicken, um Details zu sehen.</div>
+      <div class="legend">
+        <strong>Legende</strong>
+        <ul>
+          <li>inactive = 0 RX und 0 TX</li>
+          <li>inferred = abgeleitet, nicht gemessen</li>
+          <li>signal/bitrate "?" = unbekannt</li>
+        </ul>
+      </div>
+    </aside>
+
+    <footer>
+      Config-Pull kann ohne Live-Daten laufen. Leere wifi_iface_status-Daten bei fehlendem SSH-Key sind kein Fehler.
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js"></script>
+  <script src="/static/topology.js"></script>
+</body>
+</html>
