@@ -15,6 +15,12 @@ from .panel import async_setup_panel
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
+    """Set up integration domain and register panel early."""
+    await async_setup_panel(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OpenWrt topology from a config entry."""
     await async_setup_panel(hass)
