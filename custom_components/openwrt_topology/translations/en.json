@@ -17,7 +17,8 @@
     "error": {
       "cannot_connect": "Failed to connect.",
       "invalid_response": "Response is not a valid topology snapshot.",
-      "timeout": "Connection timed out."
+      "timeout": "Connection timed out.",
+      "invalid_auth": "Authentication failed."
     }
   }
 }

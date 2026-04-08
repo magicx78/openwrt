@@ -84,6 +84,10 @@ class OpenWrtTopologyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         auth=auth,
                         headers={"Accept": "application/json"},
                     )
+                    if response.status in (401, 403):
+                        return False, "invalid_auth"
+                    if response.status == 404:
+                        return False, "invalid_response"
                     if response.status >= 400:
                         return False, "cannot_connect"
                     payload = await response.json(content_type=None)
