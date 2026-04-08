@@ -6415,104 +6415,248 @@ def _wifi_polling_task():
 # API: Netzwerk-Topologie  –  Graph-Daten für vis-network Visualisierung (v0.5.8)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/topology")
-def api_topology(db: sqlite3.Connection = Depends(get_db),
-                 _=Depends(check_admin),
-                 include_wifi: bool = False):
-    """Netzwerk-Topologie als Knoten-Kanten-Graph für vis-network Visualisierung.
+TOPOLOGY_SCHEMA_VERSION = "1.0"
+TOPOLOGY_SOURCE = "openwrt-runtime"
 
-    Query Parameter:
-    - include_wifi: bool (default: False) – Include live WiFi clients in response
-    """
-    # 1. Alle Devices laden, sortiert nach Projekt + Rolle (ap1 first)
+
+def _device_node_type(role: str) -> str:
+    if role == "ap1":
+        return "router"
+    if role in ("node", "repeater"):
+        return "ap"
+    return "client"
+
+
+def _build_topology_snapshot(
+    db: sqlite3.Connection,
+    include_wifi: bool = True,
+    source_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build canonical topology snapshot from openwrt runtime data."""
     devices = db.execute("""
-        SELECT base_mac, hostname, role, project, status, last_ip,
-               board_name, model, claimed, last_seen
+        SELECT base_mac, hostname, role, project, status, last_ip, board_name, model, claimed, last_seen
         FROM devices
         ORDER BY project, CASE role WHEN 'ap1' THEN 0 ELSE 1 END, hostname
     """).fetchall()
 
-    # 2. Devices → Knoten konvertieren
-    nodes = []
-    device_by_mac = {}
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    interfaces: List[Dict[str, Any]] = []
+    clients: List[Dict[str, Any]] = []
 
     for d in devices:
-        # Type-Mapping: role → GUI-Typ für vis-network
-        if d['role'] == 'ap1':
-            node_type = 'router'
-            color = '#4fc3f7'  # Blau
-        elif d['role'] in ('node', 'repeater'):
-            node_type = 'ap'
-            color = '#81c784'  # Grün
-        else:
-            node_type = 'client'
-            color = '#e0e0e0'  # Grau
+        dev_id = d["base_mac"]
+        nodes.append({
+            "id": dev_id,
+            "type": _device_node_type(d["role"] or ""),
+            "label": d["hostname"] or dev_id[:12],
+            "source": "openwrt.devices",
+            "inferred": False,
+            "status": d["status"],
+            "project": d["project"],
+            "role": d["role"],
+            "ip": d["last_ip"],
+            "attributes": {
+                "board_name": d["board_name"],
+                "model": d["model"],
+                "claimed": d["claimed"],
+                "last_seen": d["last_seen"],
+            },
+        })
 
-        # Status → Rahmenfarbe (grün=provisioned, gelb=pending, rot=error)
-        status_map = {
-            'provisioned': '#10b981',  # Grün
-            'pending': '#f59e0b',      # Gelb/Orange
-            'error': '#ef4444',        # Rot
-            'FAILED': '#ef4444'        # Rot
-        }
-        border_color = status_map.get(d['status'], '#9ca3af')  # Grau default
+    if include_wifi:
+        for ap_mac, iface_map in _wifi_iface_status.items():
+            if not isinstance(iface_map, dict):
+                continue
+            for iface_name, iface_data in iface_map.items():
+                iface_type = _classify_interface(iface_name, "", iface_name)
+                iface_id = f"iface:{ap_mac}:{iface_name}"
+                valid = iface_data.get("valid", True)
+                status = iface_data.get("status", "unknown")
+                warning = iface_data.get("warning")
+                inferred = iface_type == "unknown"
 
-        # Knoten-Definition für vis-network
-        node = {
-            'id': d['base_mac'],
-            'label': d['hostname'] or d['base_mac'][:12],
-            'type': node_type,
-            'title': f"{d['hostname'] or 'Unbekannt'}\nIP: {d['last_ip'] or '-'}\n{d['board_name'] or 'Unknown'}",
-            'role': d['role'],
-            'project': d['project'],
-            'status': d['status'],
-            'ip': d['last_ip'],
-            'version': d['board_name'],  # Mock: board_name als version
-            'color': color,
-            'borderColor': border_color,
-            'borderWidth': 2
-        }
-        nodes.append(node)
-        device_by_mac[d['base_mac']] = d
+                interfaces.append({
+                    "id": iface_id,
+                    "ap_mac": ap_mac,
+                    "name": iface_name,
+                    "interface_type": iface_type,
+                    "rx_bytes": iface_data.get("rx_bytes"),
+                    "tx_bytes": iface_data.get("tx_bytes"),
+                    "valid": valid,
+                    "status": status,
+                    "warning": warning,
+                    "source": "openwrt.wifi_iface_status",
+                    "inferred": inferred,
+                    "inference_reason": "interface_type_unknown" if inferred else None,
+                })
 
-    # 3. Edges: ap1 → nodes/repeaters im gleichen Projekt
-    edges = []
-    for d in devices:
-        if d['role'] == 'ap1':
-            # Master AP: verbinde mit allen nodes/repeaters im gleichen Projekt
-            for other in devices:
-                if other['project'] == d['project'] and \
-                   other['role'] in ('node', 'repeater') and \
-                   other['base_mac'] != d['base_mac']:
-                    edges.append({
-                        'id': f"{d['base_mac']}--{other['base_mac']}",
-                        'from': d['base_mac'],
-                        'to': other['base_mac'],
-                        'arrows': 'to',
-                        'width': 2,
-                        'color': '#555'
-                    })
+                nodes.append({
+                    "id": iface_id,
+                    "type": "interface",
+                    "label": iface_name,
+                    "source": "openwrt.wifi_iface_status",
+                    "inferred": inferred,
+                    "inference_reason": "interface_type_unknown" if inferred else None,
+                    "status": status,
+                    "valid": valid,
+                    "attributes": {
+                        "ap_mac": ap_mac,
+                        "interface_type": iface_type,
+                        "rx_bytes": iface_data.get("rx_bytes"),
+                        "tx_bytes": iface_data.get("tx_bytes"),
+                        "warning": warning,
+                    },
+                })
+                edges.append({
+                    "id": f"{ap_mac}--{iface_id}",
+                    "from": ap_mac,
+                    "to": iface_id,
+                    "relationship": "has_interface",
+                    "source": "openwrt.wifi_iface_status",
+                    "inferred": False,
+                })
 
-    # 4. Projekte extrahieren
-    projects = sorted(set(d['project'] for d in devices if d['project']))
+                ssid_id = f"ssid:{ap_mac}:{iface_name}:unknown"
+                nodes.append({
+                    "id": ssid_id,
+                    "type": "ssid",
+                    "label": f"SSID ? ({iface_name})",
+                    "source": "openwrt.wifi_iface_status",
+                    "inferred": True,
+                    "inference_reason": "ssid_missing_from_runtime_data",
+                    "status": status,
+                    "attributes": {
+                        "ap_mac": ap_mac,
+                        "interface_name": iface_name,
+                        "interface_type": iface_type,
+                    },
+                })
+                edges.append({
+                    "id": f"{iface_id}--{ssid_id}",
+                    "from": iface_id,
+                    "to": ssid_id,
+                    "relationship": "broadcasts_ssid",
+                    "source": "openwrt.wifi_iface_status",
+                    "inferred": True,
+                    "inference_reason": "ssid_missing_from_runtime_data",
+                })
 
-    # Response zusammenstellen
-    response = {
-        'devices': nodes,  # Kompatibilität mit vis-network Template (devices key)
-        'nodes': nodes,    # Auch nodes key für template
-        'edges': edges,
-        'projects': projects,
-        'timestamp': now_utc().isoformat()
+        for ap_mac, ap_clients in _wifi_clients.items():
+            if not isinstance(ap_clients, dict):
+                continue
+            for client_mac, info in ap_clients.items():
+                client_id = f"client:{client_mac.lower()}"
+                signal = info.get("signal")
+                bitrate = info.get("bitrate")
+                clients.append({
+                    "id": client_id,
+                    "mac": client_mac.lower(),
+                    "ap_mac": ap_mac,
+                    "signal": signal,
+                    "bitrate": bitrate,
+                    "connected": info.get("connected"),
+                    "last_seen": info.get("last_seen"),
+                    "source": "openwrt.wifi_clients",
+                    "inferred": True,
+                    "inference_reason": "ssid_and_interface_unknown_for_wifi_client",
+                })
+                ssid_unknown = next(
+                    (n["id"] for n in nodes if n["type"] == "ssid" and n["attributes"].get("ap_mac") == ap_mac),
+                    ap_mac,
+                )
+                nodes.append({
+                    "id": client_id,
+                    "type": "client",
+                    "label": client_mac.lower(),
+                    "source": "openwrt.wifi_clients",
+                    "inferred": True,
+                    "inference_reason": "ssid_and_interface_unknown_for_wifi_client",
+                    "status": "active",
+                    "attributes": {
+                        "ap_mac": ap_mac,
+                        "signal": signal,
+                        "bitrate": bitrate,
+                        "connected": info.get("connected"),
+                        "last_seen": info.get("last_seen"),
+                    },
+                })
+                edges.append({
+                    "id": f"{ssid_unknown}--{client_id}",
+                    "from": ssid_unknown,
+                    "to": client_id,
+                    "relationship": "has_client",
+                    "source": "openwrt.wifi_clients",
+                    "inferred": True,
+                    "inference_reason": "ssid_and_interface_unknown_for_wifi_client",
+                })
+
+    if isinstance(source_snapshot, dict):
+        for n in source_snapshot.get("nodes", []):
+            if isinstance(n, dict):
+                nodes.append({**n, "helper_only": True})
+        for e in source_snapshot.get("edges", []):
+            if isinstance(e, dict):
+                edges.append({**e, "helper_only": True})
+
+    inference_used = any(bool(x.get("inferred")) for x in [*nodes, *edges, *interfaces, *clients])
+    return {
+        "generated_at": now_utc().isoformat(),
+        "nodes": nodes,
+        "edges": edges,
+        "interfaces": interfaces,
+        "clients": clients,
+        "meta": {
+            "source": TOPOLOGY_SOURCE,
+            "schema_version": TOPOLOGY_SCHEMA_VERSION,
+            "inference_used": inference_used,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "interface_count": len(interfaces),
+            "client_count": len(clients),
+        },
     }
 
-    # Optionally attach live WiFi client data + interface activity (v0.6.2)
-    if include_wifi:
-        response['wifi_clients'] = _wifi_clients
-        response['wifi_last_update'] = _WIFI_LAST_UPDATE
-        # Fix E: interface activity status — {ap_mac: {iface: {status, rx_bytes, tx_bytes, …}}}
-        response['wifi_iface_status'] = _wifi_iface_status
 
-    return response
+@app.get("/api/topology/snapshot")
+def api_topology_snapshot(
+    db: sqlite3.Connection = Depends(get_db),
+    _=Depends(check_admin),
+    include_wifi: bool = True,
+):
+    """Canonical topology snapshot endpoint."""
+    return _build_topology_snapshot(db=db, include_wifi=include_wifi)
+
+
+@app.get("/api/topology/graph")
+def api_topology_graph(
+    db: sqlite3.Connection = Depends(get_db),
+    _=Depends(check_admin),
+    include_wifi: bool = True,
+):
+    """Graph projection of the canonical topology snapshot."""
+    snapshot = _build_topology_snapshot(db=db, include_wifi=include_wifi)
+    return {
+        "generated_at": snapshot["generated_at"],
+        "nodes": snapshot["nodes"],
+        "edges": snapshot["edges"],
+        "meta": snapshot["meta"],
+    }
+
+
+@app.get("/api/topology")
+def api_topology(db: sqlite3.Connection = Depends(get_db),
+                 _=Depends(check_admin),
+                 include_wifi: bool = True):
+    """Compatibility endpoint mapped to canonical graph."""
+    graph = api_topology_graph(db=db, include_wifi=include_wifi)
+    return {
+        "devices": graph["nodes"],
+        "nodes": graph["nodes"],
+        "edges": graph["edges"],
+        "timestamp": graph["generated_at"],
+        "meta": graph["meta"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6700,210 +6844,372 @@ setInterval(updateStatus, 2000);
 
 @app.get("/ui/topology", response_class=HTMLResponse)
 def ui_topology(_=Depends(check_admin)):
-    """Netzwerk-Topologie Visualisierung: Interaktiver Graph mit vis-network."""
+    """Netzwerk-Topologie Visualisierung: API-Layer + Domain-Mapping + Graph-UI."""
     content = r"""
 <style>
 html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #eee; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
-#app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: auto 1fr; grid-template-areas: "header header" "graph sidebar"; height: 100%; }
+#app { display: grid; grid-template-columns: 1fr 320px; grid-template-rows: auto 1fr; grid-template-areas: "header header" "graph sidebar"; height: 100%; }
 header { grid-area: header; padding: 8px 12px; background: #181818; border-bottom: 1px solid #333; display: flex; align-items: center; justify-content: space-between; }
 header .title { font-size: 14px; font-weight: 600; }
-header .controls { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+header .controls { display: flex; gap: 8px; align-items: center; font-size: 12px; flex-wrap: wrap; }
 header select, header button { background: #222; color: #eee; border: 1px solid #444; padding: 3px 6px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+header label { color: #bbb; }
 #graph { grid-area: graph; position: relative; }
 #mynetwork { width: 100%; height: 100%; background: #111; }
 #sidebar { grid-area: sidebar; border-left: 1px solid #333; background: #141414; padding: 8px; font-size: 12px; overflow-y: auto; }
 #sidebar h2 { font-size: 13px; margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid #333; }
 #sidebar .kv { margin-bottom: 4px; }
-#sidebar .kv span.key { display: inline-block; width: 90px; color: #999; }
+#sidebar .kv span.key { display: inline-block; width: 110px; color: #999; }
 .legend { margin-top: 12px; border-top: 1px solid #333; padding-top: 8px; }
 .legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
 .dot-router { background: #4fc3f7; }
 .dot-ap { background: #81c784; }
+.dot-interface { background: #ffd166; }
+.dot-ssid { background: #c084fc; }
 .dot-client { background: #e0e0e0; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/vis-network/dist/vis-network.min.js"></script>
 
 <div id="app">
   <header>
-    <div class="title">🌐 OpenWrt Netzwerk-Topologie</div>
+    <div class="title">Network Topology</div>
     <div class="controls">
-      <label for="filterSelect">Filter:</label>
-      <select id="filterSelect">
-        <option value="all">Alle</option>
-        <option value="infra">Nur Infrastruktur</option>
-        <option value="clients">Nur Clients</option>
-        <option value="with_wifi">Nur APs mit WiFi-Clients</option>
+      <label for="interfaceTypeFilter">Interface:</label>
+      <select id="interfaceTypeFilter">
+        <option value="all">all</option>
+        <option value="wifi">wifi</option>
+        <option value="lan">lan</option>
+        <option value="uplink">uplink</option>
+        <option value="unknown">unknown</option>
       </select>
-      <button id="refreshBtn">Jetzt aktualisieren</button>
-      <span id="statusText">Status: initialisiere…</span>
+      <label><input type="checkbox" id="clientsOnlyFilter"> clients only</label>
+      <label><input type="checkbox" id="showInactiveFilter" checked> show inactive</label>
+      <button id="refreshBtn">refresh</button>
+      <span id="statusText">Status: initialisiere...</span>
     </div>
   </header>
-  <div id="graph">
-    <div id="mynetwork"></div>
-  </div>
+  <div id="graph"><div id="mynetwork"></div></div>
   <aside id="sidebar">
     <h2>Details</h2>
-    <div id="detailsContent">Knoten auswählen, um Details zu sehen.</div>
+    <div id="detailsContent">Knoten auswaehlen, um Details zu sehen.</div>
     <div class="legend">
-      <strong>Legende</strong>
+      <strong>Legend</strong>
       <div class="legend-item"><span class="legend-dot dot-router"></span> Router</div>
-      <div class="legend-item"><span class="legend-dot dot-ap"></span> Access Point</div>
+      <div class="legend-item"><span class="legend-dot dot-ap"></span> AP</div>
+      <div class="legend-item"><span class="legend-dot dot-interface"></span> Interface</div>
+      <div class="legend-item"><span class="legend-dot dot-ssid"></span> SSID</div>
       <div class="legend-item"><span class="legend-dot dot-client"></span> Client</div>
     </div>
   </aside>
 </div>
 
 <script>
-  const API_URL = "/api/topology?include_wifi=1";  // NEW: request WiFi client data
-  const CURRENT_VERSION = "N/A";
-  const REFRESH_INTERVAL_MS = 5000;
-
-  const container = document.getElementById("mynetwork");
-  const statusText = document.getElementById("statusText");
-  const filterSelect = document.getElementById("filterSelect");
-  const refreshBtn = document.getElementById("refreshBtn");
-  const detailsContent = document.getElementById("detailsContent");
-
-  const nodes = new vis.DataSet([]);
-  const edges = new vis.DataSet([]);
-  const data = { nodes, edges };
-
-  const options = {
-    autoResize: true,
-    physics: { enabled: false, stabilization: { iterations: 150 } },
-    interaction: { hover: true, multiselect: false, dragNodes: true, zoomView: true, dragView: true },
-    nodes: { font: { color: "#fff", size: 11 }, borderWidth: 1, color: { border: "#555", background: "#222", highlight: { border: "#fff", background: "#333" } } },
-    edges: { color: { color: "#555", highlight: "#fff" }, smooth: true }
-  };
-
-  const network = new vis.Network(container, data, options);
-
-  function getNodeStyle(device) {
-    let colorBg = "#888", shape = "dot", size = 15;
-    if (device.type === "router") { colorBg = "#4fc3f7"; shape = "ellipse"; size = 24; }
-    else if (device.type === "ap") { colorBg = "#81c784"; shape = "dot"; size = 20; }
-    else if (device.type === "client") { colorBg = "#e0e0e0"; shape = "dot"; size = 10; }
-    let borderColor = "#555";
-    if (device.status === "error" || device.status === "FAILED") { borderColor = "#ef4444"; }
-    else if (device.status === "pending") { borderColor = "#f59e0b"; }
-    else if (device.status === "provisioned") { borderColor = "#10b981"; }
-    return { color: { background: colorBg, border: borderColor, highlight: { background: colorBg, border: "#fff" } }, shape, size };
+const TopologyApi = {
+  SNAPSHOT_URL: "/api/topology/snapshot?include_wifi=1",
+  async getTopologySnapshot() {
+    const res = await fetch(this.SNAPSHOT_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
   }
+};
 
-  function deviceToNode(device) {
-    const style = getNodeStyle(device);
-    return { id: device.id, label: device.label || device.id, title: device.title, ...style, _type: device.type };
-  }
-
-  function buildDetailsHtml(device, allDevices) {
-    const lines = [];
-    function kv(key, value) {
-      if (value === undefined || value === null || value === "") return;
-      lines.push(`<div class="kv"><span class="key">${key}:</span><span>${value}</span></div>`);
+const DomainMapper = {
+  mapSnapshot(payload) {
+    const interfaces = Array.isArray(payload.interfaces) ? payload.interfaces : [];
+    const clients = Array.isArray(payload.clients) ? payload.clients : [];
+    const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    const edges = Array.isArray(payload.edges) ? payload.edges : [];
+    const nodeById = {};
+    for (const n of nodes) {
+      const attrs = n.attributes || {};
+      nodeById[n.id] = {
+        ...n,
+        attributes: attrs,
+        signal_display: this.metricOrUnknown(attrs.signal, "dBm"),
+        bitrate_display: this.metricOrUnknown(attrs.bitrate, "Mbit/s"),
+        rx_display: this.metricOrUnknown(attrs.rx_bytes, "bytes"),
+        tx_display: this.metricOrUnknown(attrs.tx_bytes, "bytes"),
+      };
     }
-    kv("ID", device.id);
-    kv("Hostname", device.label);
-    kv("IP", device.ip || "");
-    kv("Typ", device.type);
-    kv("Rolle", device.role);
-    kv("Projekt", device.project);
-    kv("Status", device.status);
-    kv("Version", device.version || "unknown");
-    if (device.type !== "client") {
-      const clients = allDevices.filter(d => d._type === "client" && d.project === device.project);
-      if (clients.length > 0) lines.push(`<div class="kv"><span class="key">Geräte:</span><span>${clients.length}</span></div>`);
-    }
-    // NEW: Show WiFi Clients if this is an AP (v0.6.1)
-    if (device.type !== "client" && window.wifiClients && window.wifiClients[device.id]) {
-      const wifiClients = window.wifiClients[device.id];
-      const clientCount = Object.keys(wifiClients).length;
-      if (clientCount > 0) {
-        lines.push(`<div class="kv"><span class="key">WiFi Clients:</span><span>${clientCount}</span></div>`);
-        // Show top 5 clients with signal/bitrate
-        let shown = 0;
-        for (const [mac, info] of Object.entries(wifiClients)) {
-          if (shown >= 5) break;
-          const signal = info.signal || -60;
-          const bitrate = info.bitrate || 0;
-          lines.push(`<div class="kv" style="margin-left: 1em; font-size: 11px"><span class="key">${mac}:</span><span>${signal} dBm / ${bitrate} Mbit/s</span></div>`);
-          shown++;
-        }
-        if (clientCount > 5) {
-          lines.push(`<div class="kv" style="margin-left: 1em; font-size: 11px"><span class="key">+${clientCount - 5} more</span></div>`);
-        }
+    const interfaceById = {};
+    for (const iface of interfaces) {
+      interfaceById[iface.id] = iface;
+      if (!nodeById[iface.id]) {
+        nodeById[iface.id] = {
+          id: iface.id,
+          type: "interface",
+          label: iface.name || iface.id,
+          status: iface.status,
+          valid: iface.valid,
+          source: iface.source,
+          inferred: iface.inferred,
+          inference_reason: iface.inference_reason,
+          attributes: {
+            ap_mac: iface.ap_mac,
+            interface_type: iface.interface_type,
+            rx_bytes: iface.rx_bytes,
+            tx_bytes: iface.tx_bytes,
+            warning: iface.warning,
+          },
+          rx_display: this.metricOrUnknown(iface.rx_bytes, "bytes"),
+          tx_display: this.metricOrUnknown(iface.tx_bytes, "bytes"),
+        };
       }
     }
-    return lines.join("");
+    const clientById = {};
+    for (const c of clients) {
+      clientById[c.id] = c;
+      if (!nodeById[c.id]) {
+        nodeById[c.id] = {
+          id: c.id,
+          type: "client",
+          label: c.mac || c.id,
+          status: c.connected === false ? "inactive" : "active",
+          source: c.source,
+          inferred: c.inferred,
+          inference_reason: c.inference_reason,
+          attributes: {
+            ap_mac: c.ap_mac,
+            connected: c.connected,
+            last_seen: c.last_seen,
+            signal: c.signal,
+            bitrate: c.bitrate,
+          },
+          signal_display: this.metricOrUnknown(c.signal, "dBm"),
+          bitrate_display: this.metricOrUnknown(c.bitrate, "Mbit/s"),
+        };
+      }
+    }
+
+    return {
+      generated_at: payload.generated_at,
+      meta: payload.meta || {},
+      interfaces,
+      clients,
+      nodes: Object.values(nodeById),
+      edges: edges,
+      nodeById: nodeById,
+      interfaceById,
+      clientById,
+    };
+  },
+  metricOrUnknown(value, unit) {
+    if (value === null || value === undefined) return "?";
+    return unit ? `${value} ${unit}` : String(value);
+  }
+};
+
+const NodeRenderer = {
+  toVisNode(node) {
+    const style = this.style(node);
+    return {
+      id: node.id,
+      label: node.label || node.id,
+      ...style,
+      _type: node.type,
+    };
+  },
+  style(node) {
+    let colorBg = "#888", shape = "dot", size = 14;
+    if (node.type === "router") { colorBg = "#4fc3f7"; shape = "ellipse"; size = 24; }
+    else if (node.type === "ap") { colorBg = "#81c784"; shape = "dot"; size = 20; }
+    else if (node.type === "interface") { colorBg = "#ffd166"; shape = "box"; size = 14; }
+    else if (node.type === "ssid") { colorBg = "#c084fc"; shape = "diamond"; size = 14; }
+    else if (node.type === "client") { colorBg = "#e0e0e0"; shape = "dot"; size = 10; }
+
+    let borderColor = "#555";
+    if (node.valid === false) borderColor = "#ef4444";
+    else if (node.status === "inactive") borderColor = "#9ca3af";
+    else if (node.status === "error" || node.status === "FAILED") borderColor = "#ef4444";
+    else if (node.status === "pending") borderColor = "#f59e0b";
+    else if (node.status === "provisioned") borderColor = "#10b981";
+
+    if (node.status === "inactive") colorBg = "#6b7280";
+    if (node.type === "interface" && node.attributes && node.attributes.interface_type === "unknown") {
+      colorBg = "#94a3b8";
+    }
+
+    return {
+      color: { background: colorBg, border: borderColor, highlight: { background: colorBg, border: "#fff" } },
+      shape,
+      size,
+    };
+  }
+};
+
+const EdgeRenderer = {
+  toVisEdge(edge) {
+    const from = edge.from || edge.source;
+    const to = edge.to || edge.target;
+    return {
+      id: edge.id || `${from}--${to}`,
+      from,
+      to,
+      arrows: "to",
+      width: edge.inferred ? 1 : 2,
+      color: edge.inferred ? "#94a3b8" : "#555",
+    };
+  }
+};
+
+const DetailPanel = {
+  target: document.getElementById("detailsContent"),
+  render(node) {
+    if (!node) {
+      this.target.textContent = "Knoten auswaehlen, um Details zu sehen.";
+      return;
+    }
+    const lines = [];
+    const kv = (key, value) => {
+      if (value === undefined || value === null || value === "") return;
+      lines.push(`<div class="kv"><span class="key">${key}:</span><span>${value}</span></div>`);
+    };
+
+    kv("ID", node.id);
+    kv("Type", node.type);
+    kv("Label", node.label);
+    kv("Status", node.status);
+    kv("Inferred", node.inferred === true ? "yes" : "no");
+    kv("Reason", node.inference_reason || "");
+    kv("Source", node.source || "");
+    kv("Project", node.project || "");
+    kv("Role", node.role || "");
+    kv("IP", node.ip || "");
+
+    if (node.attributes) {
+      kv("Interface Type", node.attributes.interface_type || "");
+      kv("Valid", node.valid === false ? "false" : "true");
+      kv("RX", node.rx_display);
+      kv("TX", node.tx_display);
+      kv("Signal", node.signal_display);
+      kv("Bitrate", node.bitrate_display);
+      kv("Warning", node.attributes.warning || "");
+      kv("AP", node.attributes.ap_mac || "");
+      kv("Connected", node.attributes.connected);
+      kv("Last Seen", node.attributes.last_seen || "");
+    }
+
+    this.target.innerHTML = lines.join("");
+  }
+};
+
+const FilterControls = {
+  interfaceType: document.getElementById("interfaceTypeFilter"),
+  clientsOnly: document.getElementById("clientsOnlyFilter"),
+  showInactive: document.getElementById("showInactiveFilter"),
+  getState() {
+    return {
+      interfaceType: this.interfaceType.value,
+      clientsOnly: this.clientsOnly.checked,
+      showInactive: this.showInactive.checked,
+    };
+  },
+  matches(node, state) {
+    if (!state.showInactive && node.status === "inactive") return false;
+    if (state.clientsOnly && node.type !== "client") return false;
+    if (state.interfaceType !== "all" && node.type === "interface") {
+      const t = (node.attributes && node.attributes.interface_type) || "unknown";
+      if (t !== state.interfaceType) return false;
+    }
+    return true;
+  }
+};
+
+class GraphView {
+  constructor(container) {
+    this.nodes = new vis.DataSet([]);
+    this.edges = new vis.DataSet([]);
+    this.network = new vis.Network(container, { nodes: this.nodes, edges: this.edges }, {
+      autoResize: true,
+      physics: { enabled: false, stabilization: { iterations: 150 } },
+      interaction: { hover: true, multiselect: false, dragNodes: true, zoomView: true, dragView: true },
+      nodes: { font: { color: "#fff", size: 11 }, borderWidth: 1 },
+      edges: { color: { color: "#555", highlight: "#fff" }, smooth: true }
+    });
+    this.domain = { nodes: [], edges: [], nodeById: {} };
+    this.network.on("click", (params) => {
+      const id = params.nodes && params.nodes.length ? params.nodes[0] : null;
+      DetailPanel.render(id ? this.domain.nodeById[id] : null);
+    });
   }
 
-  let currentDevices = {};
+  setDomain(domain) {
+    this.domain = domain;
+    this.render();
+  }
 
-  async function fetchTopology() {
+  render() {
+    const state = FilterControls.getState();
+    const visible = new Set();
+    const visNodes = [];
+
+    for (const node of this.domain.nodes) {
+      if (!FilterControls.matches(node, state)) continue;
+      visNodes.push(NodeRenderer.toVisNode(node));
+      visible.add(node.id);
+    }
+
+    const visEdges = [];
+    for (const edge of this.domain.edges) {
+      const e = EdgeRenderer.toVisEdge(edge);
+      if (!visible.has(e.from) || !visible.has(e.to)) continue;
+      visEdges.push(e);
+    }
+
+    this.nodes.clear();
+    this.nodes.add(visNodes);
+    this.edges.clear();
+    this.edges.add(visEdges);
+  }
+}
+
+const TopologyPage = {
+  statusText: document.getElementById("statusText"),
+  refreshBtn: document.getElementById("refreshBtn"),
+  graphView: null,
+
+  async ensureVisLoaded() {
+    if (window.vis && window.vis.Network && window.vis.DataSet) return;
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/vis-network/dist/vis-network.min.js";
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error("vis-network konnte nicht geladen werden"));
+      document.head.appendChild(script);
+    });
+  },
+
+  async init() {
+    await this.ensureVisLoaded();
+    this.graphView = new GraphView(document.getElementById("mynetwork"));
+    this.bindEvents();
+    await this.reload();
+    setInterval(() => this.reload(), 5000);
+  },
+
+  bindEvents() {
+    this.refreshBtn.addEventListener("click", () => this.reload());
+    FilterControls.interfaceType.addEventListener("change", () => this.graphView.render());
+    FilterControls.clientsOnly.addEventListener("change", () => this.graphView.render());
+    FilterControls.showInactive.addEventListener("change", () => this.graphView.render());
+  },
+
+  async reload() {
     try {
-      statusText.textContent = "Status: lade…";
-      const res = await fetch(API_URL, { cache: "no-store" });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const json = await res.json();
-      const devices = json.devices || json.nodes || [];
-      const edgesData = json.edges || [];
-      currentDevices = {};
-      devices.forEach(d => currentDevices[d.id] = { ...d, _type: d.type });
-      // NEW: Store WiFi clients data (v0.6.1)
-      window.wifiClients = json.wifi_clients || {};
-      applyFilterAndRender(edgesData);
-      statusText.textContent = "Status: OK (" + new Date().toLocaleTimeString() + ")";
+      this.statusText.textContent = "Status: lade...";
+      const payload = await TopologyApi.getTopologySnapshot();
+      const domain = DomainMapper.mapSnapshot(payload);
+      this.graphView.setDomain(domain);
+      this.statusText.textContent = "Status: OK (" + new Date().toLocaleTimeString() + ")";
     } catch (err) {
       console.error(err);
-      statusText.textContent = "Status: Fehler beim Laden";
+      this.statusText.textContent = "Status: Fehler beim Laden";
     }
   }
+};
 
-  function applyFilterAndRender(edgesData) {
-    const filter = filterSelect.value;
-    const newNodes = [];
-    const visibleIds = new Set();
-    for (const device of Object.values(currentDevices)) {
-      const isInfra = (device.type === "router" || device.type === "ap");
-      const isClient = device.type === "client";
-      const hasWifiClients = window.wifiClients && window.wifiClients[device.id] &&
-                             Object.keys(window.wifiClients[device.id]).length > 0;
-      if (filter === "infra" && !isInfra) continue;
-      if (filter === "clients" && !isClient) continue;
-      if (filter === "with_wifi" && !hasWifiClients) continue;  // NEW: filter for APs with WiFi clients
-      const node = deviceToNode(device);
-      newNodes.push(node);
-      visibleIds.add(device.id);
-    }
-    nodes.clear();
-    nodes.add(newNodes);
-    const newEdges = [];
-    for (const edge of edgesData) {
-      if (visibleIds.has(edge.from) && visibleIds.has(edge.to)) newEdges.push(edge);
-    }
-    edges.clear();
-    edges.add(newEdges);
-  }
-
-  network.on("click", function (params) {
-    if (params.nodes && params.nodes.length > 0) {
-      const device = currentDevices[params.nodes[0]];
-      if (device) detailsContent.innerHTML = buildDetailsHtml(device, Object.values(currentDevices));
-    } else {
-      detailsContent.textContent = "Knoten auswählen, um Details zu sehen.";
-    }
-  });
-
-  filterSelect.addEventListener("change", async () => {
-    const res = await fetch(API_URL, { cache: "no-store" });
-    const json = await res.json();
-    applyFilterAndRender(json.edges || []);
-  });
-
-  refreshBtn.addEventListener("click", fetchTopology);
-
-  fetchTopology();
-  setInterval(fetchTopology, REFRESH_INTERVAL_MS);
+TopologyPage.init();
 </script>
 """
     return _page(content, "Topologie", "/ui/topology")
