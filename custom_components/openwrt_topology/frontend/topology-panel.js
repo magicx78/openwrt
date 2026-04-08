@@ -40,9 +40,16 @@ class OpenWrtTopologyPanel extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const resp = await fetch("/api/openwrt_topology/snapshot", { headers: { Accept: "application/json" } });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      this._snapshot = await resp.json();
+      if (this._hass && typeof this._hass.callApi === "function") {
+        this._snapshot = await this._hass.callApi("GET", "openwrt_topology/snapshot");
+      } else {
+        const resp = await fetch("/api/openwrt_topology/snapshot", {
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        this._snapshot = await resp.json();
+      }
       if (!this._selected && Array.isArray(this._snapshot.nodes) && this._snapshot.nodes.length) {
         this._selected = this._snapshot.nodes[0].id;
       }
@@ -113,7 +120,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
       .join("");
     const hints = [
       node.inferred ? '<div class="hint">Wert abgeleitet, nicht gemessen.</div>' : "",
-      node.valid === false ? '<div class="hint warn">Datenfehler - Wert nicht verl‰sslich.</div>' : "",
+      node.valid === false ? '<div class="hint warn">Datenfehler - Wert nicht verl√§sslich.</div>' : "",
     ].join("");
     return `${body}${hints}`;
   }
