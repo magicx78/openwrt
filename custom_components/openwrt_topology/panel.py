@@ -124,6 +124,58 @@ def _snapshot_from_openwrt_router_entities(hass: HomeAssistant) -> dict[str, Any
     node_ids: set[str] = set()
     edge_ids: set[str] = set()
 
+    def _add_tracker_to_graph(state, router_id: str) -> None:
+        mac = str(state.attributes.get("mac_address") or state.entity_id.split(".", 1)[-1]).lower()
+        client_id = f"client:{mac.replace('-', ':')}"
+        if client_id not in node_ids:
+            status = "inactive" if state.state in ("not_home", "unavailable", "unknown") else "active"
+            nodes.append(
+                {
+                    "id": client_id,
+                    "type": "client",
+                    "label": state.name or mac,
+                    "source": "openwrt_router.device_tracker",
+                    "inferred": True,
+                    "inference_reason": "device_tracker_bridge_fallback",
+                    "status": status,
+                    "attributes": {
+                        "mac": mac,
+                        "entity_id": state.entity_id,
+                        "state": state.state,
+                    },
+                }
+            )
+            node_ids.add(client_id)
+            clients.append(
+                {
+                    "id": client_id,
+                    "mac": mac,
+                    "ap_mac": None,
+                    "signal": None,
+                    "bitrate": None,
+                    "connected": state.state not in ("not_home", "unavailable", "unknown"),
+                    "last_seen": None,
+                    "source": "openwrt_router.device_tracker",
+                    "inferred": True,
+                    "inference_reason": "device_tracker_bridge_fallback",
+                }
+            )
+
+        edge_id = f"{router_id}--{client_id}"
+        if edge_id not in edge_ids:
+            edges.append(
+                {
+                    "id": edge_id,
+                    "from": router_id,
+                    "to": client_id,
+                    "relationship": "has_client",
+                    "source": "openwrt_router.device_tracker",
+                    "inferred": True,
+                    "inference_reason": "client_to_router_inferred_from_entity_prefix",
+                }
+            )
+            edge_ids.add(edge_id)
+
     for entry in entries:
         host = str(entry.data.get("host") or "").strip()
         if not host:
@@ -155,57 +207,16 @@ def _snapshot_from_openwrt_router_entities(hass: HomeAssistant) -> dict[str, Any
         for state in hass.states.async_all("device_tracker"):
             if not state.entity_id.startswith(prefix):
                 continue
+            _add_tracker_to_graph(state, router_id)
 
-            mac = str(state.attributes.get("mac_address") or state.entity_id.split(".", 1)[-1]).lower()
-            client_id = f"client:{mac.replace('-', ':')}"
-            if client_id not in node_ids:
-                status = "inactive" if state.state in ("not_home", "unavailable", "unknown") else "active"
-                nodes.append(
-                    {
-                        "id": client_id,
-                        "type": "client",
-                        "label": state.name or mac,
-                        "source": "openwrt_router.device_tracker",
-                        "inferred": True,
-                        "inference_reason": "device_tracker_bridge_fallback",
-                        "status": status,
-                        "attributes": {
-                            "mac": mac,
-                            "entity_id": state.entity_id,
-                            "state": state.state,
-                        },
-                    }
-                )
-                node_ids.add(client_id)
-                clients.append(
-                    {
-                        "id": client_id,
-                        "mac": mac,
-                        "ap_mac": None,
-                        "signal": None,
-                        "bitrate": None,
-                        "connected": state.state not in ("not_home", "unavailable", "unknown"),
-                        "last_seen": None,
-                        "source": "openwrt_router.device_tracker",
-                        "inferred": True,
-                        "inference_reason": "device_tracker_bridge_fallback",
-                    }
-                )
-
-            edge_id = f"{router_id}--{client_id}"
-            if edge_id not in edge_ids:
-                edges.append(
-                    {
-                        "id": edge_id,
-                        "from": router_id,
-                        "to": client_id,
-                        "relationship": "has_client",
-                        "source": "openwrt_router.device_tracker",
-                        "inferred": True,
-                        "inference_reason": "client_to_router_inferred_from_entity_prefix",
-                    }
-                )
-                edge_ids.add(edge_id)
+    # Safety fallback: if no per-entry prefix matches, use any gateway-like trackers.
+    if len(clients) == 0 and len(nodes) > 0:
+        first_router_id = next((n["id"] for n in nodes if n["type"] == "router"), None)
+        if first_router_id:
+            for state in hass.states.async_all("device_tracker"):
+                entity_id = state.entity_id.lower()
+                if "gateway_" in entity_id:
+                    _add_tracker_to_graph(state, first_router_id)
 
     if not nodes:
         return None
