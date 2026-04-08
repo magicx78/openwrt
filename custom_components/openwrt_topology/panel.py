@@ -43,6 +43,17 @@ def _is_snapshot_dict(data: Any) -> bool:
     )
 
 
+def _is_empty_snapshot(data: dict[str, Any] | None) -> bool:
+    if not isinstance(data, dict):
+        return True
+    return (
+        len(data.get("nodes", [])) == 0
+        and len(data.get("edges", [])) == 0
+        and len(data.get("interfaces", [])) == 0
+        and len(data.get("clients", [])) == 0
+    )
+
+
 def _search_snapshot_in_object(obj: Any, seen: set[int], depth: int = 0) -> dict[str, Any] | None:
     if depth > 6:
         return None
@@ -243,19 +254,25 @@ class OpenWrtTopologySnapshotView(HomeAssistantView):
                     data = value.data
                     break
 
-        if data is None:
+        if data is None or _is_empty_snapshot(data):
             # Bridge fallback: discover snapshot in openwrt_router domain objects.
             router_domain = hass.data.get("openwrt_router")
             if router_domain is not None:
-                data = _search_snapshot_in_object(router_domain, set())
+                candidate = _search_snapshot_in_object(router_domain, set())
+                if _is_snapshot_dict(candidate) and not _is_empty_snapshot(candidate):
+                    data = candidate
 
-        if data is None:
+        if data is None or _is_empty_snapshot(data):
             # Bridge fallback: discover snapshot in sensor state attributes.
-            data = _snapshot_from_states(hass)
+            candidate = _snapshot_from_states(hass)
+            if _is_snapshot_dict(candidate) and not _is_empty_snapshot(candidate):
+                data = candidate
 
-        if data is None:
+        if data is None or _is_empty_snapshot(data):
             # Bridge fallback: inferred minimal graph from openwrt_router entities.
-            data = _snapshot_from_openwrt_router_entities(hass)
+            candidate = _snapshot_from_openwrt_router_entities(hass)
+            if _is_snapshot_dict(candidate):
+                data = candidate
 
         if not _is_snapshot_dict(data):
             data = _empty_snapshot("openwrt_topology_bridge")
