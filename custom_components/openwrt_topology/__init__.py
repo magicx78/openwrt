@@ -10,12 +10,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import OpenWrtTopologyCoordinator
+from .panel import async_setup_panel
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OpenWrt topology from a config entry."""
+    await async_setup_panel(hass)
     session = async_get_clientsession(hass, verify_ssl=entry.data.get("verify_ssl", True))
     coordinator = OpenWrtTopologyCoordinator(hass, session, entry)
     await coordinator.async_refresh()
