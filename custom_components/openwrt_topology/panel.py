@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
 
 from aiohttp import web
@@ -91,6 +93,130 @@ def _snapshot_from_states(hass: HomeAssistant) -> dict[str, Any] | None:
     return None
 
 
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (value or "").lower()).strip("_")
+
+
+def _snapshot_from_openwrt_router_entities(hass: HomeAssistant) -> dict[str, Any] | None:
+    """Build a minimal inferred graph from openwrt_router entries + device_trackers.
+
+    This fallback is intentionally explicit and marks every object as inferred,
+    so we don't silently present guessed topology as measured truth.
+    """
+    entries = hass.config_entries.async_entries("openwrt_router")
+    if not entries:
+        return None
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    clients: list[dict[str, Any]] = []
+    node_ids: set[str] = set()
+    edge_ids: set[str] = set()
+
+    for entry in entries:
+        host = str(entry.data.get("host") or "").strip()
+        if not host:
+            continue
+        title = entry.title or host
+        router_id = f"router:{host}"
+        if router_id not in node_ids:
+            nodes.append(
+                {
+                    "id": router_id,
+                    "type": "router",
+                    "label": title,
+                    "ip": host,
+                    "source": "openwrt_router.config_entry",
+                    "inferred": True,
+                    "inference_reason": "router_entry_bridge_fallback",
+                    "status": "active",
+                    "attributes": {
+                        "entry_id": entry.entry_id,
+                        "host": host,
+                        "protocol": entry.data.get("protocol"),
+                        "port": entry.data.get("port"),
+                    },
+                }
+            )
+            node_ids.add(router_id)
+
+        prefix = f"device_tracker.{_slug(title)}_"
+        for state in hass.states.async_all("device_tracker"):
+            if not state.entity_id.startswith(prefix):
+                continue
+
+            mac = str(state.attributes.get("mac_address") or state.entity_id.split(".", 1)[-1]).lower()
+            client_id = f"client:{mac.replace('-', ':')}"
+            if client_id not in node_ids:
+                status = "inactive" if state.state in ("not_home", "unavailable", "unknown") else "active"
+                nodes.append(
+                    {
+                        "id": client_id,
+                        "type": "client",
+                        "label": state.name or mac,
+                        "source": "openwrt_router.device_tracker",
+                        "inferred": True,
+                        "inference_reason": "device_tracker_bridge_fallback",
+                        "status": status,
+                        "attributes": {
+                            "mac": mac,
+                            "entity_id": state.entity_id,
+                            "state": state.state,
+                        },
+                    }
+                )
+                node_ids.add(client_id)
+                clients.append(
+                    {
+                        "id": client_id,
+                        "mac": mac,
+                        "ap_mac": None,
+                        "signal": None,
+                        "bitrate": None,
+                        "connected": state.state not in ("not_home", "unavailable", "unknown"),
+                        "last_seen": None,
+                        "source": "openwrt_router.device_tracker",
+                        "inferred": True,
+                        "inference_reason": "device_tracker_bridge_fallback",
+                    }
+                )
+
+            edge_id = f"{router_id}--{client_id}"
+            if edge_id not in edge_ids:
+                edges.append(
+                    {
+                        "id": edge_id,
+                        "from": router_id,
+                        "to": client_id,
+                        "relationship": "has_client",
+                        "source": "openwrt_router.device_tracker",
+                        "inferred": True,
+                        "inference_reason": "client_to_router_inferred_from_entity_prefix",
+                    }
+                )
+                edge_ids.add(edge_id)
+
+    if not nodes:
+        return None
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "nodes": nodes,
+        "edges": edges,
+        "interfaces": [],
+        "clients": clients,
+        "meta": {
+            "source": "openwrt_router_bridge",
+            "schema_version": "1.0",
+            "inference_used": True,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "interface_count": 0,
+            "client_count": len(clients),
+        },
+    }
+
+
 class OpenWrtTopologySnapshotView(HomeAssistantView):
     """Return latest topology snapshot from loaded coordinators."""
 
@@ -126,6 +252,10 @@ class OpenWrtTopologySnapshotView(HomeAssistantView):
         if data is None:
             # Bridge fallback: discover snapshot in sensor state attributes.
             data = _snapshot_from_states(hass)
+
+        if data is None:
+            # Bridge fallback: inferred minimal graph from openwrt_router entities.
+            data = _snapshot_from_openwrt_router_entities(hass)
 
         if not _is_snapshot_dict(data):
             data = _empty_snapshot("openwrt_topology_bridge")
