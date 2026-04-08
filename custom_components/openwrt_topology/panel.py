@@ -14,6 +14,83 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
 
+def _empty_snapshot(source: str) -> dict[str, Any]:
+    return {
+        "generated_at": None,
+        "nodes": [],
+        "edges": [],
+        "interfaces": [],
+        "clients": [],
+        "meta": {
+            "source": source,
+            "schema_version": "1.0",
+            "inference_used": False,
+        },
+    }
+
+
+def _is_snapshot_dict(data: Any) -> bool:
+    return (
+        isinstance(data, dict)
+        and "generated_at" in data
+        and isinstance(data.get("nodes"), list)
+        and isinstance(data.get("edges"), list)
+        and isinstance(data.get("interfaces"), list)
+        and isinstance(data.get("clients"), list)
+        and isinstance(data.get("meta"), dict)
+    )
+
+
+def _search_snapshot_in_object(obj: Any, seen: set[int], depth: int = 0) -> dict[str, Any] | None:
+    if depth > 6:
+        return None
+    oid = id(obj)
+    if oid in seen:
+        return None
+    seen.add(oid)
+
+    if _is_snapshot_dict(obj):
+        return obj
+
+    if isinstance(obj, dict):
+        for value in obj.values():
+            found = _search_snapshot_in_object(value, seen, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(obj, (list, tuple, set)):
+        for value in obj:
+            found = _search_snapshot_in_object(value, seen, depth + 1)
+            if found is not None:
+                return found
+
+    return None
+
+
+def _snapshot_from_states(hass: HomeAssistant) -> dict[str, Any] | None:
+    # Bridge mode: allow snapshot discovery from other integrations (e.g. openwrt_router)
+    # as long as they expose the canonical snapshot fields in state attributes.
+    for state in hass.states.async_all("sensor"):
+        attrs = state.attributes
+        if _is_snapshot_dict(attrs):
+            return attrs
+        if (
+            isinstance(attrs, dict)
+            and isinstance(attrs.get("nodes"), list)
+            and isinstance(attrs.get("edges"), list)
+            and isinstance(attrs.get("interfaces"), list)
+            and isinstance(attrs.get("clients"), list)
+        ):
+            return {
+                "generated_at": attrs.get("generated_at"),
+                "nodes": attrs.get("nodes", []),
+                "edges": attrs.get("edges", []),
+                "interfaces": attrs.get("interfaces", []),
+                "clients": attrs.get("clients", []),
+                "meta": attrs.get("meta") or {"source": "entity_attributes", "schema_version": "1.0", "inference_used": False},
+            }
+    return None
+
+
 class OpenWrtTopologySnapshotView(HomeAssistantView):
     """Return latest topology snapshot from loaded coordinators."""
 
@@ -24,34 +101,35 @@ class OpenWrtTopologySnapshotView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         hass: HomeAssistant = request.app["hass"]
         domain_data = hass.data.get(DOMAIN, {})
-
         entry_id = request.query.get("entry_id")
-        coordinator = None
+        data: dict[str, Any] | None = None
 
         if entry_id:
             coordinator = domain_data.get(entry_id)
-        if coordinator is None:
+            if coordinator is not None and isinstance(getattr(coordinator, "data", None), dict):
+                data = coordinator.data
+
+        if data is None:
             for key, value in domain_data.items():
                 if key.startswith("_"):
                     continue
-                coordinator = value
-                break
+                if isinstance(getattr(value, "data", None), dict):
+                    data = value.data
+                    break
 
-        if coordinator is None:
-            return self.json_message("No loaded topology entry", status_code=404)
+        if data is None:
+            # Bridge fallback: discover snapshot in openwrt_router domain objects.
+            router_domain = hass.data.get("openwrt_router")
+            if router_domain is not None:
+                data = _search_snapshot_in_object(router_domain, set())
 
-        data: dict[str, Any] = coordinator.data or {
-            "generated_at": None,
-            "nodes": [],
-            "edges": [],
-            "interfaces": [],
-            "clients": [],
-            "meta": {
-                "source": "openwrt_topology",
-                "schema_version": "1.0",
-                "inference_used": False,
-            },
-        }
+        if data is None:
+            # Bridge fallback: discover snapshot in sensor state attributes.
+            data = _snapshot_from_states(hass)
+
+        if not _is_snapshot_dict(data):
+            data = _empty_snapshot("openwrt_topology_bridge")
+
         return self.json(data)
 
 
